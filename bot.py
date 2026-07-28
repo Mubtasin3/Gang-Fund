@@ -29,6 +29,36 @@ ADMIN_ROLE_ID = int(ADMIN_ROLE_ID)
 
 
 # ============================================================
+# RENDER WEB SERVER
+# ============================================================
+
+app = Flask(__name__)
+
+
+@app.route("/")
+def home():
+    return "GTA RP Gang Fund Bot is online!"
+
+
+@app.route("/health")
+def health():
+    return "OK"
+
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))
+
+    print("----------------------------------------")
+    print(f"Starting web server on port {port}")
+    print("----------------------------------------")
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
+
+
+# ============================================================
 # DATA FILE
 # ============================================================
 
@@ -45,13 +75,21 @@ def default_data():
 def load_data():
 
     if not os.path.exists(DATA_FILE):
+
         data = default_data()
+
         save_data(data)
+
         return data
 
     try:
 
-        with open(DATA_FILE, "r", encoding="utf-8") as file:
+        with open(
+            DATA_FILE,
+            "r",
+            encoding="utf-8"
+        ) as file:
+
             data = json.load(file)
 
         if "amount" not in data:
@@ -64,7 +102,9 @@ def load_data():
 
     except Exception as e:
 
-        print(f"Error loading data.json: {e}")
+        print(
+            f"Error loading data.json: {e}"
+        )
 
         return default_data()
 
@@ -73,7 +113,12 @@ def save_data(data):
 
     try:
 
-        with open(DATA_FILE, "w", encoding="utf-8") as file:
+        with open(
+            DATA_FILE,
+            "w",
+            encoding="utf-8"
+        ) as file:
+
             json.dump(
                 data,
                 file,
@@ -83,7 +128,9 @@ def save_data(data):
 
     except Exception as e:
 
-        print(f"Error saving data.json: {e}")
+        print(
+            f"Error saving data.json: {e}"
+        )
 
 
 data = load_data()
@@ -119,12 +166,17 @@ bot = GangFundBot()
 
 def is_admin(interaction: discord.Interaction):
 
+    if interaction.guild is None:
+        return False
+
     # Discord Administrator permission
     if interaction.user.guild_permissions.administrator:
         return True
 
     # Admin role
-    role = interaction.guild.get_role(ADMIN_ROLE_ID)
+    role = interaction.guild.get_role(
+        ADMIN_ROLE_ID
+    )
 
     if role and role in interaction.user.roles:
         return True
@@ -138,24 +190,42 @@ def is_admin(interaction: discord.Interaction):
 
 def create_fund_embed():
 
-    amount = data.get("amount", 0)
+    amount = data.get(
+        "amount",
+        0
+    )
 
-    members = data.get("members", {})
+    members = data.get(
+        "members",
+        {}
+    )
 
-    total_members = len(members)
+    total_members = len(
+        members
+    )
 
     paid_members = 0
 
     for paid in members.values():
 
         if paid is True:
+
             paid_members += 1
 
-    unpaid_members = total_members - paid_members
+    unpaid_members = (
+        total_members
+        - paid_members
+    )
 
-    collected = paid_members * amount
+    collected = (
+        paid_members
+        * amount
+    )
 
-    required = total_members * amount
+    required = (
+        total_members
+        * amount
+    )
 
     embed = discord.Embed(
         title="💰 GTA RP GANG FUND",
@@ -215,18 +285,22 @@ def create_fund_embed():
                     f"❌ **{name}** — Unpaid"
                 )
 
-        # Discord embed fields have a 1024 character limit.
-        # Split the list into multiple fields if necessary.
-
         chunks = []
 
         current_chunk = ""
 
         for line in member_list:
 
-            if len(current_chunk) + len(line) + 1 > 1000:
+            if (
+                len(current_chunk)
+                + len(line)
+                + 1
+                > 1000
+            ):
 
-                chunks.append(current_chunk)
+                chunks.append(
+                    current_chunk
+                )
 
                 current_chunk = line
 
@@ -240,17 +314,25 @@ def create_fund_embed():
 
         if current_chunk:
 
-            chunks.append(current_chunk)
+            chunks.append(
+                current_chunk
+            )
 
-        for index, chunk in enumerate(chunks):
+        for index, chunk in enumerate(
+            chunks
+        ):
 
             if index == 0:
 
-                field_name = "📋 Member List"
+                field_name = (
+                    "📋 Member List"
+                )
 
             else:
 
-                field_name = "📋 Member List (Continued)"
+                field_name = (
+                    "📋 Member List (Continued)"
+                )
 
             embed.add_field(
                 name=field_name,
@@ -274,39 +356,17 @@ def create_fund_embed():
 
 
 # ============================================================
-# UPDATE FUND PANEL
-# ============================================================
-
-async def update_fund_message(interaction):
-
-    try:
-
-        message = interaction.message
-
-        if message is None:
-            return
-
-        await message.edit(
-            embed=create_fund_embed(),
-            view=FundView()
-        )
-
-    except discord.NotFound:
-
-        print("Could not update fund panel: message was deleted.")
-
-    except discord.HTTPException as e:
-
-        print(f"Could not update fund panel: {e}")
-
-
-# ============================================================
 # PAID PLAYER SELECT
 # ============================================================
 
-class PaidSelect(discord.ui.Select):
+class PaidSelect(
+    discord.ui.Select
+):
 
-    def __init__(self, options):
+    def __init__(
+        self,
+        options
+    ):
 
         super().__init__(
             placeholder="Choose a player...",
@@ -327,7 +387,10 @@ class PaidSelect(discord.ui.Select):
         save_data(data)
 
         await interaction.response.edit_message(
-            content=f"✅ **{player}** has been marked as **PAID**.",
+            content=(
+                f"✅ **{player}** "
+                f"has been marked as **PAID**."
+            ),
             view=None
         )
 
@@ -336,9 +399,14 @@ class PaidSelect(discord.ui.Select):
 # UNPAID PLAYER SELECT
 # ============================================================
 
-class UnpaidSelect(discord.ui.Select):
+class UnpaidSelect(
+    discord.ui.Select
+):
 
-    def __init__(self, options):
+    def __init__(
+        self,
+        options
+    ):
 
         super().__init__(
             placeholder="Choose a player...",
@@ -359,7 +427,10 @@ class UnpaidSelect(discord.ui.Select):
         save_data(data)
 
         await interaction.response.edit_message(
-            content=f"❌ **{player}** has been marked as **UNPAID**.",
+            content=(
+                f"❌ **{player}** "
+                f"has been marked as **UNPAID**."
+            ),
             view=None
         )
 
@@ -368,7 +439,9 @@ class UnpaidSelect(discord.ui.Select):
 # FUND BUTTON VIEW
 # ============================================================
 
-class FundView(discord.ui.View):
+class FundView(
+    discord.ui.View
+):
 
     def __init__(self):
 
@@ -431,13 +504,17 @@ class FundView(discord.ui.View):
 
             return
 
-        select = PaidSelect(options)
+        select = PaidSelect(
+            options
+        )
 
         view = discord.ui.View(
             timeout=60
         )
 
-        view.add_item(select)
+        view.add_item(
+            select
+        )
 
         await interaction.response.send_message(
             "Select the player who paid:",
@@ -500,13 +577,17 @@ class FundView(discord.ui.View):
 
             return
 
-        select = UnpaidSelect(options)
+        select = UnpaidSelect(
+            options
+        )
 
         view = discord.ui.View(
             timeout=60
         )
 
-        view.add_item(select)
+        view.add_item(
+            select
+        )
 
         await interaction.response.send_message(
             "Select the player who is unpaid:",
@@ -524,41 +605,54 @@ async def on_ready():
 
     print("----------------------------------------")
 
-    print(f"Logged in as: {bot.user}")
+    print(
+        f"Logged in as: {bot.user}"
+    )
 
-    print(f"Bot ID: {bot.user.id}")
+    print(
+        f"Bot ID: {bot.user.id}"
+    )
 
     print("----------------------------------------")
 
-    # Register persistent buttons.
-    # This allows the buttons on an old panel
-    # to continue working after a bot restart.
+    # Prevent adding the persistent view
+    # multiple times after reconnects.
+    if not bot.synced:
 
-    bot.add_view(FundView())
-
-    try:
-
-        guild = discord.Object(
-            id=GUILD_ID
+        bot.add_view(
+            FundView()
         )
 
-        bot.tree.copy_global_to(
-            guild=guild
-        )
+        try:
 
-        synced = await bot.tree.sync(
-            guild=guild
-        )
+            guild = discord.Object(
+                id=GUILD_ID
+            )
 
-        print(
-            f"Successfully synced {len(synced)} slash commands."
-        )
+            bot.tree.copy_global_to(
+                guild=guild
+            )
 
-    except Exception as e:
+            synced = await bot.tree.sync(
+                guild=guild
+            )
 
-        print(
-            f"ERROR syncing slash commands: {e}"
-        )
+            print(
+                f"Successfully synced "
+                f"{len(synced)} slash commands."
+            )
+
+            bot.synced = True
+
+        except Exception as e:
+
+            print(
+                f"ERROR syncing slash commands: {e}"
+            )
+
+    print(
+        "GTA RP Gang Fund Bot is ready!"
+    )
 
 
 # ============================================================
@@ -577,6 +671,8 @@ async def fund_add(
     player: str
 ):
 
+    # Respond immediately so Discord
+    # does not expire the interaction.
     await interaction.response.defer(
         ephemeral=True
     )
@@ -807,7 +903,8 @@ async def fund_amount(
     save_data(data)
 
     await interaction.followup.send(
-        f"💰 Gang fund amount set to **${amount:,}** per player.",
+        f"💰 Gang fund amount set to "
+        f"**${amount:,}** per player.",
         ephemeral=True
     )
 
@@ -824,6 +921,8 @@ async def fund_list(
     interaction: discord.Interaction
 ):
 
+    # Defer immediately.
+    # Then use followup instead of response.
     await interaction.response.defer()
 
     embed = create_fund_embed()
@@ -910,19 +1009,27 @@ async def fund_panel(
 
 
 # ============================================================
-# RUN BOT
+# START BOT + RENDER WEB SERVER
 # ============================================================
 
-try:
-
-    bot.run(TOKEN)
-
-except Exception as e:
+if __name__ == "__main__":
 
     print("----------------------------------------")
-
-    print("BOT FAILED TO START")
-
-    print(f"Error: {e}")
-
+    print("Starting GTA RP Gang Fund Bot...")
     print("----------------------------------------")
+
+    # Start Flask web server in a separate thread.
+    # This is required because Render Web Services
+    # expects the application to listen on PORT.
+
+    web_thread = threading.Thread(
+        target=run_web_server,
+        daemon=True
+    )
+
+    web_thread.start()
+
+    # Start Discord bot
+    bot.run(
+        TOKEN
+    )
