@@ -1567,6 +1567,49 @@ async def fund_panel(
 # ============================================================
 
 
+def is_embed_empty(embed: discord.Embed) -> bool:
+
+    has_author = bool(embed.author and embed.author.name)
+    has_image = bool(embed.image and embed.image.url)
+    has_thumbnail = bool(embed.thumbnail and embed.thumbnail.url)
+
+    return not (
+        embed.title
+        or embed.description
+        or embed.fields
+        or has_author
+        or has_image
+        or has_thumbnail
+    )
+
+
+def preview_embeds(embeds: list) -> list:
+
+    # Discord rejects a message containing a truly empty embed
+    # (400: "description is required"). For the live preview we
+    # substitute a harmless placeholder on a COPY so the real
+    # embed object (and its modal defaults) stay untouched.
+    result = []
+
+    for embed in embeds:
+
+        if is_embed_empty(embed):
+
+            placeholder = embed.copy()
+
+            placeholder.description = (
+                "*(empty — use the buttons below to add content)*"
+            )
+
+            result.append(placeholder)
+
+        else:
+
+            result.append(embed)
+
+    return result
+
+
 def safe_color(text: str) -> discord.Color:
 
     text = text.strip().lstrip("#")
@@ -1956,7 +1999,7 @@ class EmbedBuilderView(discord.ui.View):
                 f"of {len(self.embeds)}.** "
                 f"Use the buttons below, then hit Send."
             ),
-            embeds=self.embeds,
+            embeds=preview_embeds(self.embeds),
             view=self
         )
 
@@ -2082,6 +2125,23 @@ class EmbedBuilderView(discord.ui.View):
 
     async def open_send(self, interaction: discord.Interaction):
 
+        empty_numbers = [
+            str(i + 1)
+            for i, embed in enumerate(self.embeds)
+            if is_embed_empty(embed)
+        ]
+
+        if empty_numbers:
+
+            await interaction.response.send_message(
+                f"❌ Embed {', '.join(empty_numbers)} has no content yet. "
+                f"Add a title, description, field, author, or image "
+                f"before sending.",
+                ephemeral=True
+            )
+
+            return
+
         view = discord.ui.View(timeout=120)
 
         view.add_item(
@@ -2130,7 +2190,7 @@ async def embed_create(interaction: discord.Interaction):
 
     await interaction.response.send_message(
         content="**Editing embed 1 of 1.** Use the buttons below, then hit Send.",
-        embeds=view.embeds,
+        embeds=preview_embeds(view.embeds),
         view=view,
         ephemeral=True
     )
