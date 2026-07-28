@@ -72,7 +72,10 @@ def default_data():
         # Tracks every panel message that has ever been posted
         # (via /fund_list or /fund_panel) so they can all be
         # auto-updated whenever the fund data changes.
-        "panels": []
+        "panels": [],
+        # Optional free-text note shown at the bottom of the
+        # fund embed, set with /fund_message.
+        "message": ""
     }
 
 
@@ -104,6 +107,9 @@ def load_data():
 
         if "panels" not in data:
             data["panels"] = []
+
+        if "message" not in data:
+            data["message"] = ""
 
         return data
 
@@ -352,6 +358,23 @@ def create_fund_embed():
         embed.add_field(
             name="📋 Member List",
             value="No members added yet.",
+            inline=False
+        )
+
+    # --------------------------------------------------------
+    # CUSTOM NOTE (set with /fund_message)
+    # --------------------------------------------------------
+
+    note = data.get(
+        "message",
+        ""
+    )
+
+    if note:
+
+        embed.add_field(
+            name="📝 Message",
+            value=note,
             inline=False
         )
 
@@ -1033,6 +1056,59 @@ async def fund_amount(
 
 
 # ============================================================
+# /FUND_MESSAGE
+# ============================================================
+# Sets (or clears) a free-text note shown at the bottom of the
+# fund embed, above the footer. Leave "text" empty to clear it.
+# ============================================================
+
+@bot.tree.command(
+    name="fund_message",
+    description="Set or clear a custom note shown at the bottom of the fund embed"
+)
+@app_commands.describe(
+    text="The note to show (leave empty to clear the current note)"
+)
+async def fund_message(
+    interaction: discord.Interaction,
+    text: str = ""
+):
+
+    await interaction.response.defer(
+        ephemeral=True
+    )
+
+    if not is_admin(interaction):
+
+        await interaction.followup.send(
+            "❌ You don't have permission.",
+            ephemeral=True
+        )
+
+        return
+
+    data["message"] = text.strip()
+
+    save_data(data)
+
+    await update_all_panels()
+
+    if data["message"]:
+
+        await interaction.followup.send(
+            f"📝 Fund message updated to:\n> {data['message']}",
+            ephemeral=True
+        )
+
+    else:
+
+        await interaction.followup.send(
+            "🧹 Fund message cleared.",
+            ephemeral=True
+        )
+
+
+# ============================================================
 # /FUND_LIST
 # ============================================================
 # Posts a panel and registers it so future changes auto-update it.
@@ -1140,6 +1216,594 @@ async def fund_panel(
         "✅ Gang fund panel created!",
         ephemeral=True
     )
+
+
+# ============================================================
+# ============================================================
+# GENERAL-PURPOSE EMBED BUILDER  (/embed create)
+# ============================================================
+# ============================================================
+#
+# A standalone embed creation tool, unrelated to the gang fund
+# tracker, for posting any custom embed (announcements, rules,
+# info panels, etc). Supports title/description, author, footer,
+# image/thumbnail, color, up to 25 fields, and up to 10 embeds
+# in a single message — similar to the Discord embed builder UI.
+#
+# Usage: /embed create  -> opens an interactive, ephemeral builder
+# ============================================================
+
+
+def safe_color(text: str) -> discord.Color:
+
+    text = text.strip().lstrip("#")
+
+    if not text:
+
+        return discord.Color.blurple()
+
+    try:
+
+        return discord.Color(
+            int(text, 16)
+        )
+
+    except ValueError:
+
+        return discord.Color.blurple()
+
+
+class BodyModal(discord.ui.Modal, title="Title & Description"):
+
+    def __init__(self, builder_view):
+
+        super().__init__()
+
+        self.builder_view = builder_view
+
+        embed = builder_view.current_embed()
+
+        self.title_input = discord.ui.TextInput(
+            label="Title",
+            required=False,
+            max_length=256,
+            default=embed.title or ""
+        )
+
+        self.description_input = discord.ui.TextInput(
+            label="Description",
+            style=discord.TextStyle.paragraph,
+            required=False,
+            max_length=4000,
+            default=embed.description or ""
+        )
+
+        self.add_item(self.title_input)
+        self.add_item(self.description_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+
+        embed = self.builder_view.current_embed()
+
+        embed.title = self.title_input.value or None
+        embed.description = self.description_input.value or None
+
+        await self.builder_view.refresh(interaction)
+
+
+class ColorModal(discord.ui.Modal, title="Embed Color"):
+
+    def __init__(self, builder_view):
+
+        super().__init__()
+
+        self.builder_view = builder_view
+
+        self.color_input = discord.ui.TextInput(
+            label="Hex color (e.g. 2ecc71)",
+            required=False,
+            max_length=7
+        )
+
+        self.add_item(self.color_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+
+        embed = self.builder_view.current_embed()
+
+        embed.color = safe_color(
+            self.color_input.value
+        )
+
+        await self.builder_view.refresh(interaction)
+
+
+class AuthorModal(discord.ui.Modal, title="Author"):
+
+    def __init__(self, builder_view):
+
+        super().__init__()
+
+        self.builder_view = builder_view
+
+        embed = builder_view.current_embed()
+
+        current_author = embed.author
+
+        self.name_input = discord.ui.TextInput(
+            label="Author name",
+            required=False,
+            max_length=256,
+            default=current_author.name or "" if current_author else ""
+        )
+
+        self.icon_input = discord.ui.TextInput(
+            label="Author icon URL",
+            required=False,
+            default=current_author.icon_url or "" if current_author else ""
+        )
+
+        self.url_input = discord.ui.TextInput(
+            label="Author link URL",
+            required=False,
+            default=current_author.url or "" if current_author else ""
+        )
+
+        self.add_item(self.name_input)
+        self.add_item(self.icon_input)
+        self.add_item(self.url_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+
+        embed = self.builder_view.current_embed()
+
+        if self.name_input.value:
+
+            embed.set_author(
+                name=self.name_input.value,
+                icon_url=self.icon_input.value or None,
+                url=self.url_input.value or None
+            )
+
+        else:
+
+            embed.remove_author()
+
+        await self.builder_view.refresh(interaction)
+
+
+class FooterModal(discord.ui.Modal, title="Footer"):
+
+    def __init__(self, builder_view):
+
+        super().__init__()
+
+        self.builder_view = builder_view
+
+        embed = builder_view.current_embed()
+
+        self.text_input = discord.ui.TextInput(
+            label="Footer text",
+            required=False,
+            max_length=2048,
+            default=embed.footer.text or "" if embed.footer else ""
+        )
+
+        self.icon_input = discord.ui.TextInput(
+            label="Footer icon URL",
+            required=False,
+            default=embed.footer.icon_url or "" if embed.footer else ""
+        )
+
+        self.add_item(self.text_input)
+        self.add_item(self.icon_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+
+        embed = self.builder_view.current_embed()
+
+        if self.text_input.value:
+
+            embed.set_footer(
+                text=self.text_input.value,
+                icon_url=self.icon_input.value or None
+            )
+
+        else:
+
+            embed.remove_footer()
+
+        await self.builder_view.refresh(interaction)
+
+
+class ImagesModal(discord.ui.Modal, title="Images"):
+
+    def __init__(self, builder_view):
+
+        super().__init__()
+
+        self.builder_view = builder_view
+
+        embed = builder_view.current_embed()
+
+        self.image_input = discord.ui.TextInput(
+            label="Large image URL",
+            required=False,
+            default=embed.image.url or "" if embed.image else ""
+        )
+
+        self.thumbnail_input = discord.ui.TextInput(
+            label="Thumbnail URL (small, top-right)",
+            required=False,
+            default=embed.thumbnail.url or "" if embed.thumbnail else ""
+        )
+
+        self.add_item(self.image_input)
+        self.add_item(self.thumbnail_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+
+        embed = self.builder_view.current_embed()
+
+        if self.image_input.value:
+            embed.set_image(url=self.image_input.value)
+        else:
+            embed.set_image(url=None)
+
+        if self.thumbnail_input.value:
+            embed.set_thumbnail(url=self.thumbnail_input.value)
+        else:
+            embed.set_thumbnail(url=None)
+
+        await self.builder_view.refresh(interaction)
+
+
+class AddFieldModal(discord.ui.Modal, title="Add Field"):
+
+    def __init__(self, builder_view):
+
+        super().__init__()
+
+        self.builder_view = builder_view
+
+        self.name_input = discord.ui.TextInput(
+            label="Field name",
+            required=True,
+            max_length=256
+        )
+
+        self.value_input = discord.ui.TextInput(
+            label="Field value",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=1024
+        )
+
+        self.inline_input = discord.ui.TextInput(
+            label="Inline? (yes/no)",
+            required=False,
+            default="yes",
+            max_length=3
+        )
+
+        self.add_item(self.name_input)
+        self.add_item(self.value_input)
+        self.add_item(self.inline_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+
+        embed = self.builder_view.current_embed()
+
+        if len(embed.fields) >= 25:
+
+            await interaction.response.send_message(
+                "❌ This embed already has the max of 25 fields.",
+                ephemeral=True
+            )
+
+            return
+
+        inline = self.inline_input.value.strip().lower() not in (
+            "no", "false", "n", "0"
+        )
+
+        embed.add_field(
+            name=self.name_input.value,
+            value=self.value_input.value,
+            inline=inline
+        )
+
+        await self.builder_view.refresh(interaction)
+
+
+class EmbedSwitchSelect(discord.ui.Select):
+
+    def __init__(self, builder_view):
+
+        self.builder_view = builder_view
+
+        options = [
+            discord.SelectOption(
+                label=f"Embed {i + 1}",
+                value=str(i),
+                default=(i == builder_view.active_index)
+            )
+            for i in range(len(builder_view.embeds))
+        ]
+
+        super().__init__(
+            placeholder="Choose which embed to edit...",
+            options=options,
+            row=2
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+
+        self.builder_view.active_index = int(self.values[0])
+
+        await self.builder_view.refresh(interaction)
+
+
+class SendChannelSelect(discord.ui.ChannelSelect):
+
+    def __init__(self, builder_view):
+
+        self.builder_view = builder_view
+
+        super().__init__(
+            placeholder="Choose a channel to send to...",
+            channel_types=[discord.ChannelType.text],
+            min_values=1,
+            max_values=1
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+
+        channel = self.values[0]
+
+        try:
+
+            await channel.send(
+                embeds=self.builder_view.embeds
+            )
+
+        except discord.HTTPException as e:
+
+            await interaction.response.edit_message(
+                content=f"❌ Failed to send: {e}",
+                embeds=[],
+                view=None
+            )
+
+            return
+
+        await interaction.response.edit_message(
+            content=f"✅ Sent to {channel.mention}.",
+            embeds=[],
+            view=None
+        )
+
+
+class EmbedBuilderView(discord.ui.View):
+
+    def __init__(self, owner_id: int):
+
+        super().__init__(timeout=900)
+
+        self.owner_id = owner_id
+        self.embeds = [discord.Embed(color=discord.Color.blurple())]
+        self.active_index = 0
+
+        self.build_items()
+
+    def current_embed(self) -> discord.Embed:
+
+        return self.embeds[self.active_index]
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+
+        if interaction.user.id != self.owner_id:
+
+            await interaction.response.send_message(
+                "❌ This isn't your embed builder.",
+                ephemeral=True
+            )
+
+            return False
+
+        return True
+
+    async def refresh(self, interaction: discord.Interaction):
+
+        self.build_items()
+
+        await interaction.response.edit_message(
+            content=(
+                f"**Editing embed {self.active_index + 1} "
+                f"of {len(self.embeds)}.** "
+                f"Use the buttons below, then hit Send."
+            ),
+            embeds=self.embeds,
+            view=self
+        )
+
+    def build_items(self):
+
+        self.clear_items()
+
+        def make_button(label, callback, row, style=discord.ButtonStyle.primary, disabled=False, emoji=None):
+
+            button = discord.ui.Button(
+                label=label,
+                style=style,
+                row=row,
+                disabled=disabled,
+                emoji=emoji
+            )
+
+            async def _callback(interaction: discord.Interaction, cb=callback):
+                await cb(interaction)
+
+            button.callback = _callback
+
+            self.add_item(button)
+
+        make_button("Title & Description", self.open_body, 0)
+        make_button("Author", self.open_author, 0)
+        make_button("Footer", self.open_footer, 0)
+        make_button("Images", self.open_images, 0)
+        make_button("Color", self.open_color, 0)
+
+        make_button("Add Field", self.open_add_field, 1)
+        make_button(
+            "Remove Last Field",
+            self.remove_last_field,
+            1,
+            style=discord.ButtonStyle.secondary,
+            disabled=len(self.current_embed().fields) == 0
+        )
+        make_button("Add Embed", self.add_embed, 1, style=discord.ButtonStyle.secondary)
+        make_button(
+            "Remove Embed",
+            self.remove_embed,
+            1,
+            style=discord.ButtonStyle.secondary,
+            disabled=len(self.embeds) <= 1
+        )
+
+        if len(self.embeds) > 1:
+
+            self.add_item(
+                EmbedSwitchSelect(self)
+            )
+
+        make_button("Send", self.open_send, 3, style=discord.ButtonStyle.success)
+        make_button("Cancel", self.cancel, 3, style=discord.ButtonStyle.danger)
+
+    # ----------------------------------------------------
+    # Button handlers
+    # ----------------------------------------------------
+
+    async def open_body(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(BodyModal(self))
+
+    async def open_author(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(AuthorModal(self))
+
+    async def open_footer(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(FooterModal(self))
+
+    async def open_images(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(ImagesModal(self))
+
+    async def open_color(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(ColorModal(self))
+
+    async def open_add_field(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(AddFieldModal(self))
+
+    async def remove_last_field(self, interaction: discord.Interaction):
+
+        embed = self.current_embed()
+
+        if embed.fields:
+            embed.remove_field(len(embed.fields) - 1)
+
+        await self.refresh(interaction)
+
+    async def add_embed(self, interaction: discord.Interaction):
+
+        if len(self.embeds) >= 10:
+
+            await interaction.response.send_message(
+                "❌ Discord allows a max of 10 embeds per message.",
+                ephemeral=True
+            )
+
+            return
+
+        self.embeds.append(
+            discord.Embed(color=discord.Color.blurple())
+        )
+
+        self.active_index = len(self.embeds) - 1
+
+        await self.refresh(interaction)
+
+    async def remove_embed(self, interaction: discord.Interaction):
+
+        if len(self.embeds) <= 1:
+
+            await interaction.response.send_message(
+                "❌ You must keep at least one embed.",
+                ephemeral=True
+            )
+
+            return
+
+        del self.embeds[self.active_index]
+
+        self.active_index = max(0, self.active_index - 1)
+
+        await self.refresh(interaction)
+
+    async def open_send(self, interaction: discord.Interaction):
+
+        view = discord.ui.View(timeout=120)
+
+        view.add_item(
+            SendChannelSelect(self)
+        )
+
+        await interaction.response.send_message(
+            "Choose a channel to send this to:",
+            view=view,
+            ephemeral=True
+        )
+
+    async def cancel(self, interaction: discord.Interaction):
+
+        await interaction.response.edit_message(
+            content="❌ Embed builder cancelled.",
+            embeds=[],
+            view=None
+        )
+
+
+embed_group = app_commands.Group(
+    name="embed",
+    description="Build and send custom embeds"
+)
+
+
+@embed_group.command(
+    name="create",
+    description="Open an interactive embed builder to design and send a custom embed"
+)
+async def embed_create(interaction: discord.Interaction):
+
+    if not is_admin(interaction):
+
+        await interaction.response.send_message(
+            "❌ You don't have permission.",
+            ephemeral=True
+        )
+
+        return
+
+    view = EmbedBuilderView(
+        owner_id=interaction.user.id
+    )
+
+    await interaction.response.send_message(
+        content="**Editing embed 1 of 1.** Use the buttons below, then hit Send.",
+        embeds=view.embeds,
+        view=view,
+        ephemeral=True
+    )
+
+
+bot.tree.add_command(embed_group)
 
 
 # ============================================================
