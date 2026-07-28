@@ -1,4 +1,3 @@
-```python
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -925,4 +924,3 @@ except Exception as e:
     print(f"Error: {e}")
 
     print("----------------------------------------")
-```
