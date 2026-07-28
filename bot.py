@@ -380,7 +380,7 @@ def create_fund_embed():
     if note:
 
         embed.add_field(
-            name="📝 Message",
+            name="────────",
             value=note,
             inline=False
         )
