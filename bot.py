@@ -3,6 +3,7 @@ from discord.ext import commands
 from discord import app_commands
 import json
 import os
+import io
 import threading
 from flask import Flask
 
@@ -15,6 +16,13 @@ TOKEN = os.getenv("TOKEN")
 GUILD_ID = os.getenv("GUILD_ID")
 ADMIN_ROLE_ID = os.getenv("ADMIN_ROLE_ID")
 
+# Optional: a private channel ID the bot posts a data.json backup
+# to. Because most hosts (Render included) wipe local disk on
+# every redeploy, this is what actually survives a redeploy —
+# on startup, if there's no local data.json, the bot restores
+# from the latest backup found in this channel.
+BACKUP_CHANNEL_ID = os.getenv("BACKUP_CHANNEL_ID")
+
 if not TOKEN:
     raise ValueError("ERROR: TOKEN environment variable is missing!")
 
@@ -26,6 +34,9 @@ if not ADMIN_ROLE_ID:
 
 GUILD_ID = int(GUILD_ID)
 ADMIN_ROLE_ID = int(ADMIN_ROLE_ID)
+
+if BACKUP_CHANNEL_ID:
+    BACKUP_CHANNEL_ID = int(BACKUP_CHANNEL_ID)
 
 
 # ============================================================
@@ -63,6 +74,11 @@ def run_web_server():
 # ============================================================
 
 DATA_FILE = "data.json"
+
+# Captured BEFORE load_data() runs (which creates the file if it's
+# missing), so we can tell whether this is a fresh container with
+# no local data — the signal to restore from the backup channel.
+_data_file_existed_at_boot = os.path.exists(DATA_FILE)
 
 
 def default_data():
@@ -386,6 +402,186 @@ def create_fund_embed():
 
 
 # ============================================================
+# DISCORD-CHANNEL BACKUP / RESTORE
+# ============================================================
+#
+# Solves data loss on redeploy: local disk on most hosts (Render
+# included) is wiped on every redeploy. This backs up data.json
+# as a file attachment in a private channel, and restores it on
+# startup if the local file doesn't exist. No paid disk needed.
+# ============================================================
+
+_backup_message_id = None
+
+
+async def push_backup():
+
+    if not BACKUP_CHANNEL_ID:
+        return
+
+    global _backup_message_id
+
+    try:
+
+        channel = bot.get_channel(
+            BACKUP_CHANNEL_ID
+        )
+
+        if channel is None:
+
+            channel = await bot.fetch_channel(
+                BACKUP_CHANNEL_ID
+            )
+
+    except Exception as e:
+
+        print(
+            f"Backup channel not accessible: {e}"
+        )
+
+        return
+
+    buffer = io.BytesIO(
+        json.dumps(
+            data,
+            indent=4,
+            ensure_ascii=False
+        ).encode("utf-8")
+    )
+
+    file = discord.File(
+        buffer,
+        filename="gang_fund_backup.json"
+    )
+
+    try:
+
+        if _backup_message_id:
+
+            message = await channel.fetch_message(
+                _backup_message_id
+            )
+
+            await message.edit(
+                content="🗄️ Gang fund data backup (auto-updated, do not delete)",
+                attachments=[file]
+            )
+
+            return
+
+    except discord.NotFound:
+
+        _backup_message_id = None
+
+    except Exception as e:
+
+        print(
+            f"Failed to edit backup message: {e}"
+        )
+
+        return
+
+    try:
+
+        message = await channel.send(
+            content="🗄️ Gang fund data backup (auto-updated, do not delete)",
+            file=file
+        )
+
+        _backup_message_id = message.id
+
+    except Exception as e:
+
+        print(
+            f"Failed to send backup message: {e}"
+        )
+
+
+async def restore_backup_if_needed():
+
+    if not BACKUP_CHANNEL_ID:
+        return
+
+    global data, _backup_message_id
+
+    try:
+
+        channel = bot.get_channel(
+            BACKUP_CHANNEL_ID
+        )
+
+        if channel is None:
+
+            channel = await bot.fetch_channel(
+                BACKUP_CHANNEL_ID
+            )
+
+    except Exception as e:
+
+        print(
+            f"Backup channel not accessible: {e}"
+        )
+
+        return
+
+    try:
+
+        async for message in channel.history(limit=50):
+
+            if message.author.id != bot.user.id:
+                continue
+
+            for attachment in message.attachments:
+
+                if attachment.filename != "gang_fund_backup.json":
+                    continue
+
+                # Cache this message so future backups edit it
+                # instead of spamming new messages.
+                _backup_message_id = message.id
+
+                if _data_file_existed_at_boot:
+                    # Local data already exists (e.g. a persistent
+                    # disk is attached) — don't overwrite it.
+                    return
+
+                raw = await attachment.read()
+
+                restored = json.loads(
+                    raw.decode("utf-8")
+                )
+
+                if "amount" not in restored:
+                    restored["amount"] = 0
+
+                if "members" not in restored:
+                    restored["members"] = {}
+
+                if "panels" not in restored:
+                    restored["panels"] = []
+
+                if "message" not in restored:
+                    restored["message"] = ""
+
+                data = restored
+
+                save_data(data)
+
+                print(
+                    "Restored gang fund data from Discord backup channel "
+                    f"({len(data['members'])} players)."
+                )
+
+                return
+
+    except Exception as e:
+
+        print(
+            f"Error scanning backup channel for restore: {e}"
+        )
+
+
+# ============================================================
 # PANEL AUTO-UPDATE
 # ============================================================
 #
@@ -408,6 +604,8 @@ async def register_panel(message: discord.Message):
 
 
 async def update_all_panels():
+
+    await push_backup()
 
     if not data.get("panels"):
         return
@@ -751,6 +949,8 @@ async def on_ready():
     # multiple times after reconnects.
     if not bot.synced:
 
+        await restore_backup_if_needed()
+
         bot.add_view(
             FundView()
         )
@@ -781,6 +981,10 @@ async def on_ready():
             print(
                 f"ERROR syncing slash commands: {e}"
             )
+
+        # Make sure any already-posted panels reflect whatever
+        # data we just booted with (including a restored backup).
+        await update_all_panels()
 
     print(
         "GTA RP Gang Fund Bot is ready!"
@@ -1143,7 +1347,7 @@ async def fund_list(
 
 @bot.tree.command(
     name="fund_reset",
-    description="Reset all players to unpaid"
+    description="Mark all players as unpaid again (does NOT remove anyone from the list)"
 )
 async def fund_reset(
     interaction: discord.Interaction
@@ -1174,6 +1378,135 @@ async def fund_reset(
         "🔄 All players have been reset to **UNPAID**.",
         ephemeral=True
     )
+
+
+# ============================================================
+# /FUND_RESET_LIST
+# ============================================================
+# The ONLY command that removes players from the list wholesale.
+# Gated behind a confirmation button since it's destructive and
+# cannot be undone (aside from restoring an older backup).
+# ============================================================
+
+class ConfirmResetListView(discord.ui.View):
+
+    def __init__(self, owner_id: int):
+
+        super().__init__(timeout=30)
+
+        self.owner_id = owner_id
+        self.confirmed = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+
+        if interaction.user.id != self.owner_id:
+
+            await interaction.response.send_message(
+                "❌ This confirmation isn't for you.",
+                ephemeral=True
+            )
+
+            return False
+
+        return True
+
+    @discord.ui.button(
+        label="Yes, clear the list",
+        style=discord.ButtonStyle.danger,
+        emoji="🗑️"
+    )
+    async def confirm(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        self.confirmed = True
+
+        self.stop()
+
+        await interaction.response.edit_message(
+            content="🗑️ Clearing the player list...",
+            view=None
+        )
+
+    @discord.ui.button(
+        label="Cancel",
+        style=discord.ButtonStyle.secondary
+    )
+    async def cancel(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        self.confirmed = False
+
+        self.stop()
+
+        await interaction.response.edit_message(
+            content="❌ Cancelled. Player list unchanged.",
+            view=None
+        )
+
+
+@bot.tree.command(
+    name="fund_reset_list",
+    description="Permanently remove ALL players from the gang fund list"
+)
+async def fund_reset_list(
+    interaction: discord.Interaction
+):
+
+    await interaction.response.defer(
+        ephemeral=True
+    )
+
+    if not is_admin(interaction):
+
+        await interaction.followup.send(
+            "❌ You don't have permission.",
+            ephemeral=True
+        )
+
+        return
+
+    if not data["members"]:
+
+        await interaction.followup.send(
+            "❌ The player list is already empty.",
+            ephemeral=True
+        )
+
+        return
+
+    count = len(data["members"])
+
+    view = ConfirmResetListView(
+        owner_id=interaction.user.id
+    )
+
+    await interaction.followup.send(
+        f"⚠️ This will permanently remove all **{count}** players "
+        f"from the list. This cannot be undone. Are you sure?",
+        view=view,
+        ephemeral=True
+    )
+
+    await view.wait()
+
+    if view.confirmed:
+
+        data["members"] = {}
+
+        save_data(data)
+
+        await update_all_panels()
+
+        await interaction.followup.send(
+            "✅ Player list cleared.",
+            ephemeral=True
+        )
 
 
 # ============================================================
