@@ -4,17 +4,9 @@ from discord import app_commands
 import json
 import os
 
-
-# =========================
-# LOAD CONFIG
-# =========================
-
-with open("config.json", "r") as file:
-    config = json.load(file)
-
-TOKEN = config["TOKEN"]
-GUILD_ID = int(config["GUILD_ID"])
-ADMIN_ROLE_ID = int(config["ADMIN_ROLE_ID"])
+TOKEN = os.getenv("TOKEN")
+GUILD_ID = int(os.getenv("GUILD_ID"))
+ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID"))
 
 
 # =========================
