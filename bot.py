@@ -19,6 +19,7 @@ import asyncio
 import json
 import os
 import re
+import traceback
 
 import discord
 from discord import app_commands
@@ -809,7 +810,11 @@ async def fund_help(interaction: discord.Interaction):
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    print(f"[COMMAND ERROR] {error}")
+    # Unwrap to the real underlying exception and print a full traceback
+    # so failures are actually diagnosable from the console.
+    original = getattr(error, "original", error)
+    print(f"[COMMAND ERROR] /{interaction.command.name if interaction.command else '?'} failed:")
+    traceback.print_exception(type(original), original, original.__traceback__)
 
     if isinstance(error, app_commands.CommandOnCooldown):
         return
