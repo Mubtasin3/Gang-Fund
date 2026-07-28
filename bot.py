@@ -68,7 +68,11 @@ DATA_FILE = "data.json"
 def default_data():
     return {
         "amount": 0,
-        "members": {}
+        "members": {},
+        # Tracks every panel message that has ever been posted
+        # (via /fund_list or /fund_panel) so they can all be
+        # auto-updated whenever the fund data changes.
+        "panels": []
     }
 
 
@@ -97,6 +101,9 @@ def load_data():
 
         if "members" not in data:
             data["members"] = {}
+
+        if "panels" not in data:
+            data["panels"] = []
 
         return data
 
@@ -356,6 +363,104 @@ def create_fund_embed():
 
 
 # ============================================================
+# PANEL AUTO-UPDATE
+# ============================================================
+#
+# Every panel message ever posted with /fund_list or /fund_panel
+# gets tracked in data["panels"]. Whenever fund data changes, we
+# push the updated embed to every tracked panel automatically.
+# If a panel message was deleted, it's dropped from the list.
+# ============================================================
+
+async def register_panel(message: discord.Message):
+
+    data["panels"].append(
+        {
+            "channel_id": message.channel.id,
+            "message_id": message.id
+        }
+    )
+
+    save_data(data)
+
+
+async def update_all_panels():
+
+    if not data.get("panels"):
+        return
+
+    embed = create_fund_embed()
+
+    still_valid = []
+
+    for panel in data["panels"]:
+
+        try:
+
+            channel = bot.get_channel(
+                panel["channel_id"]
+            )
+
+            if channel is None:
+
+                channel = await bot.fetch_channel(
+                    panel["channel_id"]
+                )
+
+            message = await channel.fetch_message(
+                panel["message_id"]
+            )
+
+            await message.edit(
+                embed=embed,
+                view=FundView()
+            )
+
+            still_valid.append(panel)
+
+        except (
+            discord.NotFound,
+            discord.Forbidden,
+            discord.HTTPException
+        ) as e:
+
+            print(
+                f"Dropping stale panel "
+                f"{panel}: {e}"
+            )
+
+    data["panels"] = still_valid
+
+    save_data(data)
+
+
+# ============================================================
+# AUTOCOMPLETE FOR EXISTING PLAYERS
+# ============================================================
+
+async def player_autocomplete(
+    interaction: discord.Interaction,
+    current: str
+):
+
+    current_lower = current.lower()
+
+    matches = [
+        name
+        for name in data["members"].keys()
+        if current_lower in name.lower()
+    ]
+
+    return [
+        app_commands.Choice(
+            name=name,
+            value=name
+        )
+        for name in matches[:25]
+    ]
+
+
+# ============================================================
 # PAID PLAYER SELECT
 # ============================================================
 
@@ -393,6 +498,8 @@ class PaidSelect(
             ),
             view=None
         )
+
+        await update_all_panels()
 
 
 # ============================================================
@@ -433,6 +540,8 @@ class UnpaidSelect(
             ),
             view=None
         )
+
+        await update_all_panels()
 
 
 # ============================================================
@@ -658,17 +767,21 @@ async def on_ready():
 # ============================================================
 # /FUND_ADD
 # ============================================================
+# Uses a real Discord member picker instead of free text, so the
+# stored name is always a proper display name — never a raw
+# mention string like <@123456789012345678>.
+# ============================================================
 
 @bot.tree.command(
     name="fund_add",
     description="Add a player to the gang fund"
 )
 @app_commands.describe(
-    player="Player name"
+    player="Select the player to add"
 )
 async def fund_add(
     interaction: discord.Interaction,
-    player: str
+    player: discord.Member
 ):
 
     # Respond immediately so Discord
@@ -686,32 +799,25 @@ async def fund_add(
 
         return
 
-    player = player.strip()
+    name = player.display_name
 
-    if not player:
+    if name in data["members"]:
 
         await interaction.followup.send(
-            "❌ Player name cannot be empty.",
+            f"❌ **{name}** is already in the fund.",
             ephemeral=True
         )
 
         return
 
-    if player in data["members"]:
-
-        await interaction.followup.send(
-            f"❌ **{player}** is already in the fund.",
-            ephemeral=True
-        )
-
-        return
-
-    data["members"][player] = False
+    data["members"][name] = False
 
     save_data(data)
 
+    await update_all_panels()
+
     await interaction.followup.send(
-        f"✅ Added **{player}** to the gang fund.",
+        f"✅ Added **{name}** to the gang fund.",
         ephemeral=True
     )
 
@@ -726,6 +832,9 @@ async def fund_add(
 )
 @app_commands.describe(
     player="Player name"
+)
+@app_commands.autocomplete(
+    player=player_autocomplete
 )
 async def fund_remove(
     interaction: discord.Interaction,
@@ -758,6 +867,8 @@ async def fund_remove(
 
     save_data(data)
 
+    await update_all_panels()
+
     await interaction.followup.send(
         f"🗑️ Removed **{player}** from the gang fund.",
         ephemeral=True
@@ -774,6 +885,9 @@ async def fund_remove(
 )
 @app_commands.describe(
     player="Player name"
+)
+@app_commands.autocomplete(
+    player=player_autocomplete
 )
 async def fund_paid(
     interaction: discord.Interaction,
@@ -806,6 +920,8 @@ async def fund_paid(
 
     save_data(data)
 
+    await update_all_panels()
+
     await interaction.followup.send(
         f"✅ **{player}** has paid the gang fund.",
         ephemeral=True
@@ -822,6 +938,9 @@ async def fund_paid(
 )
 @app_commands.describe(
     player="Player name"
+)
+@app_commands.autocomplete(
+    player=player_autocomplete
 )
 async def fund_unpaid(
     interaction: discord.Interaction,
@@ -853,6 +972,8 @@ async def fund_unpaid(
     data["members"][player] = False
 
     save_data(data)
+
+    await update_all_panels()
 
     await interaction.followup.send(
         f"❌ **{player}** is now marked as unpaid.",
@@ -902,6 +1023,8 @@ async def fund_amount(
 
     save_data(data)
 
+    await update_all_panels()
+
     await interaction.followup.send(
         f"💰 Gang fund amount set to "
         f"**${amount:,}** per player.",
@@ -911,6 +1034,8 @@ async def fund_amount(
 
 # ============================================================
 # /FUND_LIST
+# ============================================================
+# Posts a panel and registers it so future changes auto-update it.
 # ============================================================
 
 @bot.tree.command(
@@ -927,10 +1052,13 @@ async def fund_list(
 
     embed = create_fund_embed()
 
-    await interaction.followup.send(
+    message = await interaction.followup.send(
         embed=embed,
-        view=FundView()
+        view=FundView(),
+        wait=True
     )
+
+    await register_panel(message)
 
 
 # ============================================================
@@ -964,6 +1092,8 @@ async def fund_reset(
 
     save_data(data)
 
+    await update_all_panels()
+
     await interaction.followup.send(
         "🔄 All players have been reset to **UNPAID**.",
         ephemeral=True
@@ -972,6 +1102,8 @@ async def fund_reset(
 
 # ============================================================
 # /FUND_PANEL
+# ============================================================
+# Posts a panel and registers it so future changes auto-update it.
 # ============================================================
 
 @bot.tree.command(
@@ -997,10 +1129,12 @@ async def fund_panel(
 
     embed = create_fund_embed()
 
-    await interaction.channel.send(
+    message = await interaction.channel.send(
         embed=embed,
         view=FundView()
     )
+
+    await register_panel(message)
 
     await interaction.followup.send(
         "✅ Gang fund panel created!",
