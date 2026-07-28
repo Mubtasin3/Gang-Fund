@@ -248,7 +248,7 @@ def create_fund_embed():
     )
 
     embed = discord.Embed(
-        title="💰 GTA RP GANG FUND",
+        title="💰 GANG FUND - TITAN",
         description="Gang fund payment tracker",
         color=discord.Color.green()
     )
