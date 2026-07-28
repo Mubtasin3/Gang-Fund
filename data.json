@@ -1,4 +1,21 @@
 {
-    "amount": 0,
-    "members": {}
+    "amount": 5000,
+    "members": {
+        "Entry_Killler": false,
+        "Blayde": false,
+        "Sheron": false,
+        "A l I F": false,
+        "*MubTαຮin*": false,
+        "shanto Chowdhury": false,
+        "Fahim": false,
+        "Fahad": false,
+        "Xadik!": false
+    },
+    "panels": [
+        {
+            "channel_id": 1449633052325052473,
+            "message_id": 1531742531019214909
+        }
+    ],
+    "message": "**📅・Deadline-**07/08/2026                         **⏳・Remaining Time-**<t:1786032000:R>"
 }
