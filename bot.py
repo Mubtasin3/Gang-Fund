@@ -3,6 +3,8 @@ from discord.ext import commands
 from discord import app_commands
 import json
 import os
+import re
+import asyncio
 
 
 # ============================================================
@@ -15,13 +17,19 @@ ADMIN_ROLE_ID = os.getenv("ADMIN_ROLE_ID")
 
 
 if not TOKEN:
-    raise ValueError("ERROR: TOKEN environment variable is missing!")
+    raise ValueError(
+        "TOKEN environment variable is missing!"
+    )
 
 if not GUILD_ID:
-    raise ValueError("ERROR: GUILD_ID environment variable is missing!")
+    raise ValueError(
+        "GUILD_ID environment variable is missing!"
+    )
 
 if not ADMIN_ROLE_ID:
-    raise ValueError("ERROR: ADMIN_ROLE_ID environment variable is missing!")
+    raise ValueError(
+        "ADMIN_ROLE_ID environment variable is missing!"
+    )
 
 
 GUILD_ID = int(GUILD_ID)
@@ -43,55 +51,14 @@ def default_data():
     }
 
 
-def load_data():
-
-    if not os.path.exists(DATA_FILE):
-
-        data = default_data()
-
-        save_data(data)
-
-        return data
+def save_data():
 
     try:
 
-        with open(
-            DATA_FILE,
-            "r",
-            encoding="utf-8"
-        ) as file:
-
-            data = json.load(file)
-
-
-        if "amount" not in data:
-
-            data["amount"] = 0
-
-
-        if "members" not in data:
-
-            data["members"] = {}
-
-
-        return data
-
-
-    except Exception as e:
-
-        print(
-            f"Error loading data.json: {e}"
-        )
-
-        return default_data()
-
-
-def save_data(data):
-
-    try:
+        temp_file = DATA_FILE + ".tmp"
 
         with open(
-            DATA_FILE,
+            temp_file,
             "w",
             encoding="utf-8"
         ) as file:
@@ -104,14 +71,169 @@ def save_data(data):
             )
 
 
-    except Exception as e:
-
-        print(
-            f"Error saving data.json: {e}"
+        os.replace(
+            temp_file,
+            DATA_FILE
         )
 
 
+    except Exception as e:
+
+        print(
+            f"[DATA ERROR] Could not save data: {e}"
+        )
+
+
+def load_data():
+
+    if not os.path.exists(DATA_FILE):
+
+        new_data = default_data()
+
+        try:
+
+            with open(
+                DATA_FILE,
+                "w",
+                encoding="utf-8"
+            ) as file:
+
+                json.dump(
+                    new_data,
+                    file,
+                    indent=4
+                )
+
+        except Exception as e:
+
+            print(
+                f"[DATA ERROR] Could not create data.json: {e}"
+            )
+
+        return new_data
+
+
+    try:
+
+        with open(
+            DATA_FILE,
+            "r",
+            encoding="utf-8"
+        ) as file:
+
+            loaded = json.load(file)
+
+
+        if not isinstance(
+            loaded,
+            dict
+        ):
+
+            return default_data()
+
+
+        if "amount" not in loaded:
+
+            loaded["amount"] = 0
+
+
+        if "members" not in loaded:
+
+            loaded["members"] = {}
+
+
+        return loaded
+
+
+    except Exception as e:
+
+        print(
+            f"[DATA ERROR] Could not load data.json: {e}"
+        )
+
+        return default_data()
+
+
 data = load_data()
+
+
+# ============================================================
+# CONVERT OLD DATA TO DISCORD IDS
+# ============================================================
+
+def convert_old_member_ids():
+
+    members = data.get(
+        "members",
+        {}
+    )
+
+
+    converted = {}
+
+    changed = False
+
+
+    for key, paid in members.items():
+
+        key = str(
+            key
+        )
+
+
+        # Already a normal Discord ID
+        if key.isdigit():
+
+            converted[key] = bool(
+                paid
+            )
+
+            continue
+
+
+        # Convert:
+        # <@123456789>
+        # <@!123456789>
+
+        match = re.fullmatch(
+
+            r"<@!?(\d+)>",
+
+            key
+
+        )
+
+
+        if match:
+
+            user_id = match.group(1)
+
+            converted[user_id] = bool(
+                paid
+            )
+
+            changed = True
+
+        else:
+
+            # Keep unknown old data
+            converted[key] = bool(
+                paid
+            )
+
+
+    if changed:
+
+        data["members"] = converted
+
+        save_data()
+
+        print(
+            "[DATA] Converted old Discord mentions to IDs."
+        )
+
+
+convert_old_member_ids()
 
 
 # ============================================================
@@ -123,44 +245,114 @@ intents = discord.Intents.default()
 intents.members = True
 
 
-class GangFundBot(commands.Bot):
+class GangFundBot(
+    commands.Bot
+):
+
 
     def __init__(self):
 
         super().__init__(
+
             command_prefix="!",
+
             intents=intents
+
         )
+
+
+        self.synced = False
+
+        self.views_added = False
 
 
 bot = GangFundBot()
 
 
 # ============================================================
-# GET MEMBER NAME
+# SAFE INTERACTION HELPERS
 # ============================================================
 
-def get_member_name(
-    guild: discord.Guild,
-    user_id
+async def safe_defer(
+    interaction: discord.Interaction,
+    ephemeral=False
 ):
 
     try:
 
-        member = guild.get_member(
-            int(user_id)
+        if not interaction.response.is_done():
+
+            await interaction.response.defer(
+
+                ephemeral=ephemeral
+
+            )
+
+            return True
+
+
+    except discord.NotFound:
+
+        print(
+            "[INTERACTION] Interaction expired "
+            "before defer."
         )
 
-        if member:
-
-            return member.display_name
-
-    except:
-
-        pass
+        return False
 
 
-    return f"Unknown User ({user_id})"
+    except discord.HTTPException as e:
+
+        print(
+            f"[INTERACTION] Defer failed: {e}"
+        )
+
+        return False
+
+
+    return True
+
+
+async def safe_followup(
+    interaction: discord.Interaction,
+    content=None,
+    embed=None,
+    view=None,
+    ephemeral=False
+):
+
+    try:
+
+        return await interaction.followup.send(
+
+            content=content,
+
+            embed=embed,
+
+            view=view,
+
+            ephemeral=ephemeral
+
+        )
+
+
+    except discord.NotFound:
+
+        print(
+            "[INTERACTION] Interaction expired "
+            "before followup."
+        )
+
+        return None
+
+
+    except discord.HTTPException as e:
+
+        print(
+            f"[INTERACTION] Followup failed: {e}"
+        )
+
+        return None
 
 
 # ============================================================
@@ -171,18 +363,20 @@ def is_admin(
     interaction: discord.Interaction
 ):
 
-    if interaction.user.guild_permissions.administrator:
-
-        return True
-
-
     if not interaction.guild:
 
         return False
 
 
+    if interaction.user.guild_permissions.administrator:
+
+        return True
+
+
     role = interaction.guild.get_role(
+
         ADMIN_ROLE_ID
+
     )
 
 
@@ -195,27 +389,175 @@ def is_admin(
 
 
 # ============================================================
-# CREATE FUND EMBED
+# GET MEMBER
 # ============================================================
 
-def create_fund_embed(
+async def get_member(
+    guild: discord.Guild,
+    user_id
+):
+
+    try:
+
+        user_id = int(
+            user_id
+        )
+
+    except:
+
+        return None
+
+
+    member = guild.get_member(
+
+        user_id
+
+    )
+
+
+    if member:
+
+        return member
+
+
+    try:
+
+        return await guild.fetch_member(
+
+            user_id
+
+        )
+
+    except:
+
+        return None
+
+
+# ============================================================
+# GET DISPLAY NAME
+# ============================================================
+
+async def get_display_name(
+    guild: discord.Guild,
+    user_id
+):
+
+    member = await get_member(
+
+        guild,
+
+        user_id
+
+    )
+
+
+    if member:
+
+        return member.display_name
+
+
+    return f"Unknown User ({user_id})"
+
+
+# ============================================================
+# CREATE PLAYER OPTIONS
+# ============================================================
+
+async def create_player_options(
     guild: discord.Guild
 ):
 
-    amount = data.get(
-        "amount",
-        0
+    options = []
+
+
+    for user_id in data["members"]:
+
+        member = await get_member(
+
+            guild,
+
+            user_id
+
+        )
+
+
+        if member:
+
+            display_name = member.display_name
+
+            description = (
+
+                f"@{member.name}"
+
+            )[:100]
+
+        else:
+
+            display_name = (
+
+                f"Unknown User ({user_id})"
+
+            )
+
+            description = (
+
+                "User is no longer "
+                "in this server"
+
+            )
+
+
+        options.append(
+
+            discord.SelectOption(
+
+                label=display_name[:100],
+
+                value=str(
+                    user_id
+                ),
+
+                description=description[:100]
+
+            )
+
+        )
+
+
+    return options
+
+
+# ============================================================
+# CREATE FUND EMBED
+# ============================================================
+
+async def create_fund_embed(
+    guild: discord.Guild
+):
+
+    amount = int(
+
+        data.get(
+            "amount",
+            0
+        )
+
     )
 
 
     members = data.get(
+
         "members",
+
         {}
+
     )
 
 
     total_members = len(
+
         members
+
     )
 
 
@@ -230,20 +572,26 @@ def create_fund_embed(
 
 
     unpaid_members = (
+
         total_members
         - paid_members
+
     )
 
 
     collected = (
+
         paid_members
         * amount
+
     )
 
 
     required = (
+
         total_members
         * amount
+
     )
 
 
@@ -252,7 +600,12 @@ def create_fund_embed(
         title="💰 GTA RP GANG FUND",
 
         description=(
-            "Gang fund payment tracker"
+
+            "Gang fund payment tracker\n\n"
+
+            "Use the buttons below to "
+            "mark members as paid or unpaid."
+
         ),
 
         color=discord.Color.green()
@@ -265,7 +618,9 @@ def create_fund_embed(
         name="💵 Fund Per Player",
 
         value=(
+
             f"${amount:,}"
+
         ),
 
         inline=True
@@ -278,7 +633,11 @@ def create_fund_embed(
         name="👥 Members",
 
         value=(
-            str(total_members)
+
+            str(
+                total_members
+            )
+
         ),
 
         inline=True
@@ -291,8 +650,10 @@ def create_fund_embed(
         name="💰 Collected",
 
         value=(
+
             f"${collected:,} / "
             f"${required:,}"
+
         ),
 
         inline=True
@@ -305,7 +666,11 @@ def create_fund_embed(
         name="✅ Paid",
 
         value=(
-            str(paid_members)
+
+            str(
+                paid_members
+            )
+
         ),
 
         inline=True
@@ -318,7 +683,11 @@ def create_fund_embed(
         name="❌ Unpaid",
 
         value=(
-            str(unpaid_members)
+
+            str(
+                unpaid_members
+            )
+
         ),
 
         inline=True
@@ -332,23 +701,27 @@ def create_fund_embed(
 
     if members:
 
-        member_list = []
+        member_lines = []
 
 
         for user_id, paid in members.items():
 
-            player_name = get_member_name(
+            player_name = (
 
-                guild,
+                await get_display_name(
 
-                user_id
+                    guild,
+
+                    user_id
+
+                )
 
             )
 
 
             if paid is True:
 
-                member_list.append(
+                member_lines.append(
 
                     f"✅ **{player_name}** — Paid"
 
@@ -356,7 +729,7 @@ def create_fund_embed(
 
             else:
 
-                member_list.append(
+                member_lines.append(
 
                     f"❌ **{player_name}** — Unpaid"
 
@@ -365,14 +738,14 @@ def create_fund_embed(
 
         chunks = []
 
-        current_chunk = ""
+        current = ""
 
 
-        for line in member_list:
+        for line in member_lines:
 
             if (
 
-                len(current_chunk)
+                len(current)
                 + len(line)
                 + 1
 
@@ -382,51 +755,57 @@ def create_fund_embed(
 
                 chunks.append(
 
-                    current_chunk
+                    current
 
                 )
 
-                current_chunk = line
+                current = line
 
             else:
 
-                if current_chunk:
+                if current:
 
-                    current_chunk += "\n"
+                    current += "\n"
 
-                current_chunk += line
+                current += line
 
 
-        if current_chunk:
+        if current:
 
             chunks.append(
 
-                current_chunk
+                current
 
             )
 
 
         for index, chunk in enumerate(
+
             chunks
+
         ):
 
             if index == 0:
 
-                field_name = (
+                name = (
+
                     "📋 Member List"
+
                 )
 
             else:
 
-                field_name = (
+                name = (
+
                     "📋 Member List "
                     "(Continued)"
+
                 )
 
 
             embed.add_field(
 
-                name=field_name,
+                name=name,
 
                 value=chunk,
 
@@ -442,7 +821,9 @@ def create_fund_embed(
             name="📋 Member List",
 
             value=(
+
                 "No members added yet."
+
             ),
 
             inline=False
@@ -453,8 +834,9 @@ def create_fund_embed(
     embed.set_footer(
 
         text=(
-            "Use the buttons below "
-            "to update payments."
+
+            "Gang Fund System"
+
         )
 
     )
@@ -464,10 +846,10 @@ def create_fund_embed(
 
 
 # ============================================================
-# UPDATE EXISTING FUND PANEL
+# UPDATE PANEL
 # ============================================================
 
-async def update_fund_panel(
+async def update_panel_from_interaction(
     interaction: discord.Interaction
 ):
 
@@ -478,13 +860,16 @@ async def update_fund_panel(
             return
 
 
+        embed = await create_fund_embed(
+
+            interaction.guild
+
+        )
+
+
         await interaction.message.edit(
 
-            embed=create_fund_embed(
-
-                interaction.guild
-
-            ),
+            embed=embed,
 
             view=FundView()
 
@@ -495,8 +880,7 @@ async def update_fund_panel(
 
         print(
 
-            "Fund panel message "
-            "was not found."
+            "[PANEL] Panel message no longer exists."
 
         )
 
@@ -505,53 +889,9 @@ async def update_fund_panel(
 
         print(
 
-            f"Could not update "
-            f"fund panel: {e}"
+            f"[PANEL] Could not update panel: {e}"
 
         )
-
-
-# ============================================================
-# PLAYER SELECT OPTIONS
-# ============================================================
-
-def create_player_options(
-    guild: discord.Guild
-):
-
-    options = []
-
-
-    for user_id in data["members"]:
-
-        player_name = get_member_name(
-
-            guild,
-
-            user_id
-
-        )
-
-
-        options.append(
-
-            discord.SelectOption(
-
-                label=player_name[:100],
-
-                value=str(user_id),
-
-                description=(
-                    "Discord ID: "
-                    f"{user_id}"
-                )[:100]
-
-            )
-
-        )
-
-
-    return options
 
 
 # ============================================================
@@ -559,19 +899,26 @@ def create_player_options(
 # ============================================================
 
 class PaidSelect(
+
     discord.ui.Select
+
 ):
 
 
     def __init__(
+
         self,
+
         options
+
     ):
 
         super().__init__(
 
             placeholder=(
+
                 "Choose a player..."
+
             ),
 
             min_values=1,
@@ -584,8 +931,11 @@ class PaidSelect(
 
 
     async def callback(
+
         self,
+
         interaction: discord.Interaction
+
     ):
 
         user_id = self.values[0]
@@ -593,10 +943,25 @@ class PaidSelect(
 
         if user_id not in data["members"]:
 
-            await interaction.response.send_message(
+            await safe_defer(
 
-                "❌ This player is no longer "
-                "in the gang fund.",
+                interaction,
+
+                ephemeral=True
+
+            )
+
+
+            await safe_followup(
+
+                interaction,
+
+                content=(
+
+                    "❌ This player is no longer "
+                    "in the gang fund."
+
+                ),
 
                 ephemeral=True
 
@@ -608,19 +973,41 @@ class PaidSelect(
         data["members"][user_id] = True
 
 
-        save_data(data)
+        save_data()
 
 
-        player_name = get_member_name(
+        player_name = (
 
-            interaction.guild,
+            await get_display_name(
 
-            user_id
+                interaction.guild,
+
+                user_id
+
+            )
 
         )
 
 
-        await interaction.response.edit_message(
+        # Acknowledge dropdown immediately
+
+        success = await safe_defer(
+
+            interaction,
+
+            ephemeral=True
+
+        )
+
+
+        if not success:
+
+            return
+
+
+        await safe_followup(
+
+            interaction,
 
             content=(
 
@@ -629,26 +1016,18 @@ class PaidSelect(
 
             ),
 
-            view=None
+            ephemeral=True
 
         )
 
 
-        # Update the original panel
+        # Update original panel
 
-        try:
+        await update_panel_from_interaction(
 
-            await interaction.message.edit(
+            interaction
 
-                content=(
-                    "Select the player who paid:"
-                )
-
-            )
-
-        except:
-
-            pass
+        )
 
 
 # ============================================================
@@ -656,19 +1035,26 @@ class PaidSelect(
 # ============================================================
 
 class UnpaidSelect(
+
     discord.ui.Select
+
 ):
 
 
     def __init__(
+
         self,
+
         options
+
     ):
 
         super().__init__(
 
             placeholder=(
+
                 "Choose a player..."
+
             ),
 
             min_values=1,
@@ -681,8 +1067,11 @@ class UnpaidSelect(
 
 
     async def callback(
+
         self,
+
         interaction: discord.Interaction
+
     ):
 
         user_id = self.values[0]
@@ -690,10 +1079,25 @@ class UnpaidSelect(
 
         if user_id not in data["members"]:
 
-            await interaction.response.send_message(
+            await safe_defer(
 
-                "❌ This player is no longer "
-                "in the gang fund.",
+                interaction,
+
+                ephemeral=True
+
+            )
+
+
+            await safe_followup(
+
+                interaction,
+
+                content=(
+
+                    "❌ This player is no longer "
+                    "in the gang fund."
+
+                ),
 
                 ephemeral=True
 
@@ -705,19 +1109,39 @@ class UnpaidSelect(
         data["members"][user_id] = False
 
 
-        save_data(data)
+        save_data()
 
 
-        player_name = get_member_name(
+        player_name = (
 
-            interaction.guild,
+            await get_display_name(
 
-            user_id
+                interaction.guild,
+
+                user_id
+
+            )
 
         )
 
 
-        await interaction.response.edit_message(
+        success = await safe_defer(
+
+            interaction,
+
+            ephemeral=True
+
+        )
+
+
+        if not success:
+
+            return
+
+
+        await safe_followup(
+
+            interaction,
 
             content=(
 
@@ -726,17 +1150,26 @@ class UnpaidSelect(
 
             ),
 
-            view=None
+            ephemeral=True
+
+        )
+
+
+        await update_panel_from_interaction(
+
+            interaction
 
         )
 
 
 # ============================================================
-# PAID / UNPAID BUTTON VIEW
+# FUND PANEL BUTTONS
 # ============================================================
 
 class FundView(
+
     discord.ui.View
+
 ):
 
 
@@ -762,7 +1195,9 @@ class FundView(
         emoji="✅",
 
         custom_id=(
+
             "gang_fund_mark_paid"
+
         )
 
     )
@@ -776,13 +1211,38 @@ class FundView(
 
     ):
 
+        # Acknowledge FIRST
 
-        if not is_admin(interaction):
+        success = await safe_defer(
 
-            await interaction.response.send_message(
+            interaction,
 
-                "❌ You don't have permission "
-                "to manage the gang fund.",
+            ephemeral=True
+
+        )
+
+
+        if not success:
+
+            return
+
+
+        if not is_admin(
+
+            interaction
+
+        ):
+
+            await safe_followup(
+
+                interaction,
+
+                content=(
+
+                    "❌ You don't have permission "
+                    "to manage the gang fund."
+
+                ),
 
                 ephemeral=True
 
@@ -793,10 +1253,16 @@ class FundView(
 
         if not data["members"]:
 
-            await interaction.response.send_message(
+            await safe_followup(
 
-                "❌ No players have been "
-                "added yet.",
+                interaction,
+
+                content=(
+
+                    "❌ No players have been "
+                    "added yet."
+
+                ),
 
                 ephemeral=True
 
@@ -805,20 +1271,30 @@ class FundView(
             return
 
 
-        options = create_player_options(
+        options = (
 
-            interaction.guild
+            await create_player_options(
+
+                interaction.guild
+
+            )
 
         )
 
 
         if len(options) > 25:
 
-            await interaction.response.send_message(
+            await safe_followup(
 
-                "❌ There are more than "
-                "25 players. Use `/fund_paid` "
-                "instead.",
+                interaction,
+
+                content=(
+
+                    "❌ There are more than "
+                    "25 players.\n\n"
+                    "Use `/fund_paid` instead."
+
+                ),
 
                 ephemeral=True
 
@@ -848,9 +1324,15 @@ class FundView(
         )
 
 
-        await interaction.response.send_message(
+        await safe_followup(
 
-            "Select the player who paid:",
+            interaction,
+
+            content=(
+
+                "Select the player who paid:"
+
+            ),
 
             view=view,
 
@@ -888,13 +1370,36 @@ class FundView(
 
     ):
 
+        success = await safe_defer(
 
-        if not is_admin(interaction):
+            interaction,
 
-            await interaction.response.send_message(
+            ephemeral=True
 
-                "❌ You don't have permission "
-                "to manage the gang fund.",
+        )
+
+
+        if not success:
+
+            return
+
+
+        if not is_admin(
+
+            interaction
+
+        ):
+
+            await safe_followup(
+
+                interaction,
+
+                content=(
+
+                    "❌ You don't have permission "
+                    "to manage the gang fund."
+
+                ),
 
                 ephemeral=True
 
@@ -905,10 +1410,16 @@ class FundView(
 
         if not data["members"]:
 
-            await interaction.response.send_message(
+            await safe_followup(
 
-                "❌ No players have been "
-                "added yet.",
+                interaction,
+
+                content=(
+
+                    "❌ No players have been "
+                    "added yet."
+
+                ),
 
                 ephemeral=True
 
@@ -917,20 +1428,30 @@ class FundView(
             return
 
 
-        options = create_player_options(
+        options = (
 
-            interaction.guild
+            await create_player_options(
+
+                interaction.guild
+
+            )
 
         )
 
 
         if len(options) > 25:
 
-            await interaction.response.send_message(
+            await safe_followup(
 
-                "❌ There are more than "
-                "25 players. Use `/fund_unpaid` "
-                "instead.",
+                interaction,
+
+                content=(
+
+                    "❌ There are more than "
+                    "25 players.\n\n"
+                    "Use `/fund_unpaid` instead."
+
+                ),
 
                 ephemeral=True
 
@@ -960,9 +1481,15 @@ class FundView(
         )
 
 
-        await interaction.response.send_message(
+        await safe_followup(
 
-            "Select the player who is unpaid:",
+            interaction,
+
+            content=(
+
+                "Select the player who is unpaid:"
+
+            ),
 
             view=view,
 
@@ -978,107 +1505,92 @@ class FundView(
 @bot.event
 async def on_ready():
 
-
     print(
-        "----------------------------------------"
+        "========================================"
     )
 
-
     print(
-
         f"Logged in as: {bot.user}"
-
     )
 
-
     print(
-
         f"Bot ID: {bot.user.id}"
-
     )
+
+    print(
+        "========================================"
+    )
+
+
+    # Add persistent buttons ONLY ONCE
+
+    if not bot.views_added:
+
+        bot.add_view(
+
+            FundView()
+
+        )
+
+        bot.views_added = True
+
+
+    # Sync commands ONLY ONCE
+
+    if not bot.synced:
+
+        try:
+
+            guild = discord.Object(
+
+                id=GUILD_ID
+
+            )
+
+
+            bot.tree.copy_global_to(
+
+                guild=guild
+
+            )
+
+
+            synced = await bot.tree.sync(
+
+                guild=guild
+
+            )
+
+
+            bot.synced = True
+
+
+            print(
+
+                f"Successfully synced "
+                f"{len(synced)} slash commands."
+
+            )
+
+
+        except Exception as e:
+
+            print(
+
+                f"[SYNC ERROR] {e}"
+
+            )
 
 
     print(
-        "----------------------------------------"
-    )
 
-
-    # Persistent buttons
-
-    bot.add_view(
-
-        FundView()
+        "Bot is ready!"
 
     )
-
-
-    try:
-
-
-        guild = discord.Object(
-
-            id=GUILD_ID
-
-        )
-
-
-        bot.tree.copy_global_to(
-
-            guild=guild
-
-        )
-
-
-        synced = await bot.tree.sync(
-
-            guild=guild
-
-        )
-
-
-        print(
-
-            f"Successfully synced "
-            f"{len(synced)} slash commands."
-
-        )
-
-
-    except Exception as e:
-
-
-        print(
-
-            f"ERROR syncing slash "
-            f"commands: {e}"
-
-        )
 
 
 # ============================================================
 # /FUND_ADD
-# ============================================================
-
-class FundAddGroup(
-    app_commands.Group
-):
-
-
-    def __init__(self):
-
-        super().__init__(
-
-            name="fund",
-
-            description=(
-                "Gang fund commands"
-            )
-
-        )
-
-
-# ============================================================
-# ADD PLAYER
 # ============================================================
 
 @bot.tree.command(
@@ -1086,15 +1598,19 @@ class FundAddGroup(
     name="fund_add",
 
     description=(
+
         "Add a Discord member "
         "to the gang fund"
+
     )
 
 )
 @app_commands.describe(
 
     player=(
+
         "Select the Discord member"
+
     )
 
 )
@@ -1106,19 +1622,35 @@ async def fund_add(
 
 ):
 
+    success = await safe_defer(
 
-    await interaction.response.defer(
+        interaction,
 
         ephemeral=True
 
     )
 
 
-    if not is_admin(interaction):
+    if not success:
 
-        await interaction.followup.send(
+        return
 
-            "❌ You don't have permission.",
+
+    if not is_admin(
+
+        interaction
+
+    ):
+
+        await safe_followup(
+
+            interaction,
+
+            content=(
+
+                "❌ You don't have permission."
+
+            ),
 
             ephemeral=True
 
@@ -1136,10 +1668,16 @@ async def fund_add(
 
     if user_id in data["members"]:
 
-        await interaction.followup.send(
+        await safe_followup(
 
-            f"❌ **{player.display_name}** "
-            "is already in the fund.",
+            interaction,
+
+            content=(
+
+                f"❌ **{player.display_name}** "
+                "is already in the fund."
+
+            ),
 
             ephemeral=True
 
@@ -1148,18 +1686,24 @@ async def fund_add(
         return
 
 
-    # Save Discord ID only
+    # SAVE ONLY DISCORD ID
 
     data["members"][user_id] = False
 
 
-    save_data(data)
+    save_data()
 
 
-    await interaction.followup.send(
+    await safe_followup(
 
-        f"✅ Added **{player.display_name}** "
-        "to the gang fund.",
+        interaction,
+
+        content=(
+
+            f"✅ Added **{player.display_name}** "
+            "to the gang fund."
+
+        ),
 
         ephemeral=True
 
@@ -1167,7 +1711,7 @@ async def fund_add(
 
 
 # ============================================================
-# REMOVE PLAYER
+# /FUND_REMOVE
 # ============================================================
 
 @bot.tree.command(
@@ -1175,15 +1719,19 @@ async def fund_add(
     name="fund_remove",
 
     description=(
+
         "Remove a Discord member "
         "from the gang fund"
+
     )
 
 )
 @app_commands.describe(
 
     player=(
+
         "Select the Discord member"
+
     )
 
 )
@@ -1195,19 +1743,35 @@ async def fund_remove(
 
 ):
 
+    success = await safe_defer(
 
-    await interaction.response.defer(
+        interaction,
 
         ephemeral=True
 
     )
 
 
-    if not is_admin(interaction):
+    if not success:
 
-        await interaction.followup.send(
+        return
 
-            "❌ You don't have permission.",
+
+    if not is_admin(
+
+        interaction
+
+    ):
+
+        await safe_followup(
+
+            interaction,
+
+            content=(
+
+                "❌ You don't have permission."
+
+            ),
 
             ephemeral=True
 
@@ -1225,10 +1789,16 @@ async def fund_remove(
 
     if user_id not in data["members"]:
 
-        await interaction.followup.send(
+        await safe_followup(
 
-            f"❌ **{player.display_name}** "
-            "is not in the fund.",
+            interaction,
+
+            content=(
+
+                f"❌ **{player.display_name}** "
+                "is not in the fund."
+
+            ),
 
             ephemeral=True
 
@@ -1240,13 +1810,19 @@ async def fund_remove(
     del data["members"][user_id]
 
 
-    save_data(data)
+    save_data()
 
 
-    await interaction.followup.send(
+    await safe_followup(
 
-        f"🗑️ Removed **{player.display_name}** "
-        "from the gang fund.",
+        interaction,
+
+        content=(
+
+            f"🗑️ Removed **{player.display_name}** "
+            "from the gang fund."
+
+        ),
 
         ephemeral=True
 
@@ -1254,7 +1830,7 @@ async def fund_remove(
 
 
 # ============================================================
-# MARK PAID
+# /FUND_PAID
 # ============================================================
 
 @bot.tree.command(
@@ -1262,15 +1838,18 @@ async def fund_remove(
     name="fund_paid",
 
     description=(
-        "Mark a Discord member "
-        "as paid"
+
+        "Mark a Discord member as paid"
+
     )
 
 )
 @app_commands.describe(
 
     player=(
+
         "Select the Discord member"
+
     )
 
 )
@@ -1282,19 +1861,35 @@ async def fund_paid(
 
 ):
 
+    success = await safe_defer(
 
-    await interaction.response.defer(
+        interaction,
 
         ephemeral=True
 
     )
 
 
-    if not is_admin(interaction):
+    if not success:
 
-        await interaction.followup.send(
+        return
 
-            "❌ You don't have permission.",
+
+    if not is_admin(
+
+        interaction
+
+    ):
+
+        await safe_followup(
+
+            interaction,
+
+            content=(
+
+                "❌ You don't have permission."
+
+            ),
 
             ephemeral=True
 
@@ -1312,10 +1907,16 @@ async def fund_paid(
 
     if user_id not in data["members"]:
 
-        await interaction.followup.send(
+        await safe_followup(
 
-            f"❌ **{player.display_name}** "
-            "is not in the fund.",
+            interaction,
+
+            content=(
+
+                f"❌ **{player.display_name}** "
+                "is not in the fund."
+
+            ),
 
             ephemeral=True
 
@@ -1327,13 +1928,19 @@ async def fund_paid(
     data["members"][user_id] = True
 
 
-    save_data(data)
+    save_data()
 
 
-    await interaction.followup.send(
+    await safe_followup(
 
-        f"✅ **{player.display_name}** "
-        "has paid the gang fund.",
+        interaction,
+
+        content=(
+
+            f"✅ **{player.display_name}** "
+            "has been marked as paid."
+
+        ),
 
         ephemeral=True
 
@@ -1341,7 +1948,7 @@ async def fund_paid(
 
 
 # ============================================================
-# MARK UNPAID
+# /FUND_UNPAID
 # ============================================================
 
 @bot.tree.command(
@@ -1350,8 +1957,7 @@ async def fund_paid(
 
     description=(
 
-        "Mark a Discord member "
-        "as unpaid"
+        "Mark a Discord member as unpaid"
 
     )
 
@@ -1373,19 +1979,35 @@ async def fund_unpaid(
 
 ):
 
+    success = await safe_defer(
 
-    await interaction.response.defer(
+        interaction,
 
         ephemeral=True
 
     )
 
 
-    if not is_admin(interaction):
+    if not success:
 
-        await interaction.followup.send(
+        return
 
-            "❌ You don't have permission.",
+
+    if not is_admin(
+
+        interaction
+
+    ):
+
+        await safe_followup(
+
+            interaction,
+
+            content=(
+
+                "❌ You don't have permission."
+
+            ),
 
             ephemeral=True
 
@@ -1403,10 +2025,16 @@ async def fund_unpaid(
 
     if user_id not in data["members"]:
 
-        await interaction.followup.send(
+        await safe_followup(
 
-            f"❌ **{player.display_name}** "
-            "is not in the fund.",
+            interaction,
+
+            content=(
+
+                f"❌ **{player.display_name}** "
+                "is not in the fund."
+
+            ),
 
             ephemeral=True
 
@@ -1418,13 +2046,19 @@ async def fund_unpaid(
     data["members"][user_id] = False
 
 
-    save_data(data)
+    save_data()
 
 
-    await interaction.followup.send(
+    await safe_followup(
 
-        f"❌ **{player.display_name}** "
-        "is now marked as unpaid.",
+        interaction,
+
+        content=(
+
+            f"❌ **{player.display_name}** "
+            "has been marked as unpaid."
+
+        ),
 
         ephemeral=True
 
@@ -1432,7 +2066,7 @@ async def fund_unpaid(
 
 
 # ============================================================
-# SET FUND AMOUNT
+# /FUND_AMOUNT
 # ============================================================
 
 @bot.tree.command(
@@ -1441,8 +2075,7 @@ async def fund_unpaid(
 
     description=(
 
-        "Set the required "
-        "gang fund amount"
+        "Set the required gang fund amount"
 
     )
 
@@ -1451,8 +2084,7 @@ async def fund_unpaid(
 
     amount=(
 
-        "Amount required "
-        "from each player"
+        "Amount required from each player"
 
     )
 
@@ -1465,19 +2097,35 @@ async def fund_amount(
 
 ):
 
+    success = await safe_defer(
 
-    await interaction.response.defer(
+        interaction,
 
         ephemeral=True
 
     )
 
 
-    if not is_admin(interaction):
+    if not success:
 
-        await interaction.followup.send(
+        return
 
-            "❌ You don't have permission.",
+
+    if not is_admin(
+
+        interaction
+
+    ):
+
+        await safe_followup(
+
+            interaction,
+
+            content=(
+
+                "❌ You don't have permission."
+
+            ),
 
             ephemeral=True
 
@@ -1488,9 +2136,15 @@ async def fund_amount(
 
     if amount < 0:
 
-        await interaction.followup.send(
+        await safe_followup(
 
-            "❌ Amount cannot be negative.",
+            interaction,
+
+            content=(
+
+                "❌ Amount cannot be negative."
+
+            ),
 
             ephemeral=True
 
@@ -1502,13 +2156,19 @@ async def fund_amount(
     data["amount"] = amount
 
 
-    save_data(data)
+    save_data()
 
 
-    await interaction.followup.send(
+    await safe_followup(
 
-        f"💰 Gang fund amount set to "
-        f"**${amount:,}** per player.",
+        interaction,
+
+        content=(
+
+            f"💰 Gang fund amount set to "
+            f"**${amount:,}** per player."
+
+        ),
 
         ephemeral=True
 
@@ -1516,7 +2176,7 @@ async def fund_amount(
 
 
 # ============================================================
-# SHOW FUND LIST
+# /FUND_LIST
 # ============================================================
 
 @bot.tree.command(
@@ -1536,18 +2196,30 @@ async def fund_list(
 
 ):
 
+    success = await safe_defer(
 
-    await interaction.response.defer()
+        interaction,
+
+        ephemeral=False
+
+    )
 
 
-    embed = create_fund_embed(
+    if not success:
+
+        return
+
+
+    embed = await create_fund_embed(
 
         interaction.guild
 
     )
 
 
-    await interaction.followup.send(
+    await safe_followup(
+
+        interaction,
 
         embed=embed,
 
@@ -1557,7 +2229,7 @@ async def fund_list(
 
 
 # ============================================================
-# RESET ALL PAYMENTS
+# /FUND_RESET
 # ============================================================
 
 @bot.tree.command(
@@ -1566,8 +2238,7 @@ async def fund_list(
 
     description=(
 
-        "Reset all players "
-        "to unpaid"
+        "Reset all players to unpaid"
 
     )
 
@@ -1578,19 +2249,35 @@ async def fund_reset(
 
 ):
 
+    success = await safe_defer(
 
-    await interaction.response.defer(
+        interaction,
 
         ephemeral=True
 
     )
 
 
-    if not is_admin(interaction):
+    if not success:
 
-        await interaction.followup.send(
+        return
 
-            "❌ You don't have permission.",
+
+    if not is_admin(
+
+        interaction
+
+    ):
+
+        await safe_followup(
+
+            interaction,
+
+            content=(
+
+                "❌ You don't have permission."
+
+            ),
 
             ephemeral=True
 
@@ -1604,13 +2291,19 @@ async def fund_reset(
         data["members"][user_id] = False
 
 
-    save_data(data)
+    save_data()
 
 
-    await interaction.followup.send(
+    await safe_followup(
 
-        "🔄 All players have been "
-        "**reset to UNPAID**.",
+        interaction,
+
+        content=(
+
+            "🔄 All players have been "
+            "**reset to UNPAID**."
+
+        ),
 
         ephemeral=True
 
@@ -1618,7 +2311,7 @@ async def fund_reset(
 
 
 # ============================================================
-# CREATE FUND PANEL
+# /FUND_PANEL
 # ============================================================
 
 @bot.tree.command(
@@ -1627,8 +2320,7 @@ async def fund_reset(
 
     description=(
 
-        "Create the gang "
-        "fund tracking panel"
+        "Create the gang fund tracking panel"
 
     )
 
@@ -1639,19 +2331,35 @@ async def fund_panel(
 
 ):
 
+    success = await safe_defer(
 
-    await interaction.response.defer(
+        interaction,
 
         ephemeral=True
 
     )
 
 
-    if not is_admin(interaction):
+    if not success:
 
-        await interaction.followup.send(
+        return
 
-            "❌ You don't have permission.",
+
+    if not is_admin(
+
+        interaction
+
+    ):
+
+        await safe_followup(
+
+            interaction,
+
+            content=(
+
+                "❌ You don't have permission."
+
+            ),
 
             ephemeral=True
 
@@ -1660,25 +2368,59 @@ async def fund_panel(
         return
 
 
-    embed = create_fund_embed(
+    embed = await create_fund_embed(
 
         interaction.guild
 
     )
 
 
-    await interaction.channel.send(
+    try:
 
-        embed=embed,
+        await interaction.channel.send(
 
-        view=FundView()
+            embed=embed,
 
-    )
+            view=FundView()
+
+        )
 
 
-    await interaction.followup.send(
+    except discord.HTTPException as e:
 
-        "✅ Gang fund panel created!",
+        print(
+
+            f"[PANEL ERROR] {e}"
+
+        )
+
+        await safe_followup(
+
+            interaction,
+
+            content=(
+
+                "❌ Could not create "
+                "the fund panel."
+
+            ),
+
+            ephemeral=True
+
+        )
+
+        return
+
+
+    await safe_followup(
+
+        interaction,
+
+        content=(
+
+            "✅ Gang fund panel created!"
+
+        ),
 
         ephemeral=True
 
@@ -1686,45 +2428,119 @@ async def fund_panel(
 
 
 # ============================================================
-# RUN BOT
+# GLOBAL ERROR HANDLER
 # ============================================================
 
-try:
+@bot.tree.error
+async def on_app_command_error(
 
+    interaction: discord.Interaction,
 
-    bot.run(
+    error: app_commands.AppCommandError
 
-        TOKEN
-
-    )
-
-
-except Exception as e:
-
+):
 
     print(
 
-        "----------------------------------------"
+        f"[COMMAND ERROR] {error}"
 
     )
 
+
+    if isinstance(
+
+        error,
+
+        app_commands.CommandOnCooldown
+
+    ):
+
+        return
+
+
+    try:
+
+        if interaction.response.is_done():
+
+            await interaction.followup.send(
+
+                "❌ An error occurred "
+                "while running this command.",
+
+                ephemeral=True
+
+            )
+
+        else:
+
+            await interaction.response.send_message(
+
+                "❌ An error occurred "
+                "while running this command.",
+
+                ephemeral=True
+
+            )
+
+
+    except:
+
+        pass
+
+
+# ============================================================
+# START BOT
+# ============================================================
+
+if __name__ == "__main__":
 
     print(
 
-        "BOT FAILED TO START"
+        "Starting GTA RP Gang Fund Bot..."
 
     )
 
 
-    print(
+    try:
 
-        f"Error: {e}"
+        bot.run(
 
-    )
+            TOKEN
+
+        )
 
 
-    print(
+    except KeyboardInterrupt:
 
-        "----------------------------------------"
+        print(
 
-    )
+            "Bot stopped."
+
+        )
+
+
+    except Exception as e:
+
+        print(
+
+            "========================================"
+
+        )
+
+        print(
+
+            "BOT FAILED TO START"
+
+        )
+
+        print(
+
+            f"Error: {e}"
+
+        )
+
+        print(
+
+            "========================================"
+
+        )
