@@ -4,6 +4,7 @@ from discord import app_commands
 import json
 import os
 import io
+import datetime
 import threading
 from flask import Flask
 
@@ -16,13 +17,6 @@ TOKEN = os.getenv("TOKEN")
 GUILD_ID = os.getenv("GUILD_ID")
 ADMIN_ROLE_ID = os.getenv("ADMIN_ROLE_ID")
 
-# Optional: a private channel ID the bot posts a data.json backup
-# to. Because most hosts (Render included) wipe local disk on
-# every redeploy, this is what actually survives a redeploy —
-# on startup, if there's no local data.json, the bot restores
-# from the latest backup found in this channel.
-BACKUP_CHANNEL_ID = os.getenv("BACKUP_CHANNEL_ID")
-
 if not TOKEN:
     raise ValueError("ERROR: TOKEN environment variable is missing!")
 
@@ -34,9 +28,6 @@ if not ADMIN_ROLE_ID:
 
 GUILD_ID = int(GUILD_ID)
 ADMIN_ROLE_ID = int(ADMIN_ROLE_ID)
-
-if BACKUP_CHANNEL_ID:
-    BACKUP_CHANNEL_ID = int(BACKUP_CHANNEL_ID)
 
 
 # ============================================================
@@ -409,35 +400,164 @@ def create_fund_embed():
 # included) is wiped on every redeploy. This backs up data.json
 # as a file attachment in a private channel, and restores it on
 # startup if the local file doesn't exist. No paid disk needed.
+#
+# The channel is found/created AUTOMATICALLY — no env var setup
+# required. If BACKUP_CHANNEL_ID is set, that channel is used
+# instead (as an override); otherwise the bot looks for a channel
+# named "gang-fund-backups" in the guild, and creates it (private,
+# bot-only) if it doesn't exist yet. This requires the bot to have
+# the "Manage Channels" permission to auto-create it.
 # ============================================================
 
+BACKUP_CHANNEL_NAME = "gang-fund-backups"
+
+_backup_channel_override_id = os.getenv("BACKUP_CHANNEL_ID")
+
+if _backup_channel_override_id:
+    _backup_channel_override_id = int(_backup_channel_override_id)
+
+_backup_channel = None
 _backup_message_id = None
 
+# Diagnostics, surfaced via /fund_backup_status
+_last_backup_ok = None
+_last_backup_error = None
+_last_backup_time = None
 
-async def push_backup():
 
-    if not BACKUP_CHANNEL_ID:
-        return
+async def get_backup_channel():
 
-    global _backup_message_id
+    global _backup_channel
 
+    if _backup_channel is not None:
+        return _backup_channel
+
+    guild = bot.get_guild(GUILD_ID)
+
+    if guild is None:
+
+        try:
+
+            guild = await bot.fetch_guild(GUILD_ID)
+
+        except Exception as e:
+
+            print(
+                f"Could not fetch guild for backups: {e}"
+            )
+
+            return None
+
+    # Explicit override via BACKUP_CHANNEL_ID env var.
+    if _backup_channel_override_id:
+
+        try:
+
+            channel = bot.get_channel(
+                _backup_channel_override_id
+            )
+
+            if channel is None:
+
+                channel = await bot.fetch_channel(
+                    _backup_channel_override_id
+                )
+
+            _backup_channel = channel
+
+            return _backup_channel
+
+        except Exception as e:
+
+            print(
+                f"BACKUP_CHANNEL_ID is set but not accessible "
+                f"({e}). Falling back to auto-managed channel."
+            )
+
+    # guild.text_channels needs the full Guild object (with the
+    # channel cache populated), not the partial one fetch_guild
+    # can return — re-fetch from cache to be safe.
+    guild = bot.get_guild(GUILD_ID)
+
+    if guild is None:
+        return None
+
+    for channel in guild.text_channels:
+
+        if channel.name == BACKUP_CHANNEL_NAME:
+
+            _backup_channel = channel
+
+            return _backup_channel
+
+    # Not found anywhere — create it, private to the bot only.
     try:
 
-        channel = bot.get_channel(
-            BACKUP_CHANNEL_ID
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(
+                view_channel=False
+            ),
+            guild.me: discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                attach_files=True,
+                read_message_history=True
+            )
+        }
+
+        channel = await guild.create_text_channel(
+            name=BACKUP_CHANNEL_NAME,
+            overwrites=overwrites,
+            reason=(
+                "Auto-created to back up gang fund data so the "
+                "player list survives redeploys."
+            )
         )
 
-        if channel is None:
+        print(
+            f"Created backup channel #{channel.name} ({channel.id})"
+        )
 
-            channel = await bot.fetch_channel(
-                BACKUP_CHANNEL_ID
-            )
+        _backup_channel = channel
+
+        return _backup_channel
+
+    except discord.Forbidden:
+
+        print(
+            "Bot is missing the 'Manage Channels' permission — "
+            "cannot auto-create the backup channel. Data will NOT "
+            "survive redeploys until this permission is granted "
+            "(or BACKUP_CHANNEL_ID is set to an existing channel "
+            "the bot can already post in)."
+        )
+
+        return None
 
     except Exception as e:
 
         print(
-            f"Backup channel not accessible: {e}"
+            f"Failed to create backup channel: {e}"
         )
+
+        return None
+
+
+async def push_backup():
+
+    global _backup_message_id
+    global _last_backup_ok, _last_backup_error, _last_backup_time
+
+    channel = await get_backup_channel()
+
+    if channel is None:
+
+        _last_backup_ok = False
+        _last_backup_error = (
+            "No backup channel available (missing permission or "
+            "inaccessible BACKUP_CHANNEL_ID)."
+        )
+        _last_backup_time = datetime.datetime.now(datetime.timezone.utc)
 
         return
 
@@ -458,30 +578,26 @@ async def push_backup():
 
         if _backup_message_id:
 
-            message = await channel.fetch_message(
-                _backup_message_id
-            )
+            try:
 
-            await message.edit(
-                content="🗄️ Gang fund data backup (auto-updated, do not delete)",
-                attachments=[file]
-            )
+                message = await channel.fetch_message(
+                    _backup_message_id
+                )
 
-            return
+                await message.edit(
+                    content="🗄️ Gang fund data backup (auto-updated, do not delete)",
+                    attachments=[file]
+                )
 
-    except discord.NotFound:
+                _last_backup_ok = True
+                _last_backup_error = None
+                _last_backup_time = datetime.datetime.now(datetime.timezone.utc)
 
-        _backup_message_id = None
+                return
 
-    except Exception as e:
+            except discord.NotFound:
 
-        print(
-            f"Failed to edit backup message: {e}"
-        )
-
-        return
-
-    try:
+                _backup_message_id = None
 
         message = await channel.send(
             content="🗄️ Gang fund data backup (auto-updated, do not delete)",
@@ -490,38 +606,28 @@ async def push_backup():
 
         _backup_message_id = message.id
 
+        _last_backup_ok = True
+        _last_backup_error = None
+        _last_backup_time = datetime.datetime.now(datetime.timezone.utc)
+
     except Exception as e:
 
         print(
-            f"Failed to send backup message: {e}"
+            f"Failed to push backup: {e}"
         )
+
+        _last_backup_ok = False
+        _last_backup_error = str(e)
+        _last_backup_time = datetime.datetime.now(datetime.timezone.utc)
 
 
 async def restore_backup_if_needed():
 
-    if not BACKUP_CHANNEL_ID:
-        return
-
     global data, _backup_message_id
 
-    try:
+    channel = await get_backup_channel()
 
-        channel = bot.get_channel(
-            BACKUP_CHANNEL_ID
-        )
-
-        if channel is None:
-
-            channel = await bot.fetch_channel(
-                BACKUP_CHANNEL_ID
-            )
-
-    except Exception as e:
-
-        print(
-            f"Backup channel not accessible: {e}"
-        )
-
+    if channel is None:
         return
 
     try:
@@ -1505,6 +1611,149 @@ async def fund_reset_list(
 
         await interaction.followup.send(
             "✅ Player list cleared.",
+            ephemeral=True
+        )
+
+
+# ============================================================
+# /FUND_BACKUP_STATUS
+# ============================================================
+# Diagnostic command so you can verify backups are actually
+# working without having to wait for a redeploy to find out.
+# ============================================================
+
+@bot.tree.command(
+    name="fund_backup_status",
+    description="Check whether gang fund data backups are working"
+)
+async def fund_backup_status(
+    interaction: discord.Interaction
+):
+
+    await interaction.response.defer(
+        ephemeral=True
+    )
+
+    if not is_admin(interaction):
+
+        await interaction.followup.send(
+            "❌ You don't have permission.",
+            ephemeral=True
+        )
+
+        return
+
+    channel = await get_backup_channel()
+
+    embed = discord.Embed(
+        title="🗄️ Backup Status",
+        color=(
+            discord.Color.green()
+            if channel is not None
+            else discord.Color.red()
+        )
+    )
+
+    if channel is not None:
+
+        embed.add_field(
+            name="Backup Channel",
+            value=channel.mention,
+            inline=False
+        )
+
+    else:
+
+        embed.add_field(
+            name="Backup Channel",
+            value=(
+                "❌ Not available — the bot likely needs the "
+                "**Manage Channels** permission to auto-create "
+                "`#gang-fund-backups`."
+            ),
+            inline=False
+        )
+
+    if _last_backup_time is not None:
+
+        status_text = (
+            "✅ Success"
+            if _last_backup_ok
+            else f"❌ Failed — {_last_backup_error}"
+        )
+
+        embed.add_field(
+            name="Last Backup Attempt",
+            value=(
+                f"{status_text}\n"
+                f"<t:{int(_last_backup_time.timestamp())}:R>"
+            ),
+            inline=False
+        )
+
+    else:
+
+        embed.add_field(
+            name="Last Backup Attempt",
+            value="No backup has been attempted yet this session.",
+            inline=False
+        )
+
+    embed.add_field(
+        name="Local data.json",
+        value=(
+            "Exists" if os.path.exists(DATA_FILE) else "Missing"
+        ),
+        inline=True
+    )
+
+    embed.add_field(
+        name="Players Tracked",
+        value=str(len(data["members"])),
+        inline=True
+    )
+
+    await interaction.followup.send(
+        embed=embed,
+        ephemeral=True
+    )
+
+
+@bot.tree.command(
+    name="fund_backup_now",
+    description="Force an immediate backup of the gang fund data"
+)
+async def fund_backup_now(
+    interaction: discord.Interaction
+):
+
+    await interaction.response.defer(
+        ephemeral=True
+    )
+
+    if not is_admin(interaction):
+
+        await interaction.followup.send(
+            "❌ You don't have permission.",
+            ephemeral=True
+        )
+
+        return
+
+    await push_backup()
+
+    if _last_backup_ok:
+
+        await interaction.followup.send(
+            f"✅ Backup saved successfully to "
+            f"{_backup_channel.mention if _backup_channel else 'the backup channel'}.",
+            ephemeral=True
+        )
+
+    else:
+
+        await interaction.followup.send(
+            f"❌ Backup failed: {_last_backup_error}",
             ephemeral=True
         )
 
