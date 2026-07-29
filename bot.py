@@ -68,7 +68,7 @@ def default_data():
         "treasury_balance": 0,
         "transactions": [],
         "treasury_panels": [],
-        # Gang Tasks
+        # Gang Tasks – updated structure
         "tasks": [],
         "task_panels": []
     }
@@ -84,32 +84,27 @@ def load_data():
         with open(DATA_FILE, "r", encoding="utf-8") as file:
             data = json.load(file)
 
-        # Ensure all keys exist
         defaults = default_data()
         for key in defaults:
             if key not in data:
                 data[key] = defaults[key]
 
-        # Ensure task fields are properly initialised
+        # Ensure every task has the new fields
         for task in data.get("tasks", []):
-            for f in ["id", "name", "description", "assigned_to",
-                       "status", "reward", "created_by", "created_at",
-                       "completed_at", "completed_by"]:
-                if f not in task:
-                    if f in ("id",):
-                        task[f] = str(uuid.uuid4())
-                    elif f in ("reward",):
-                        task[f] = 0
-                    elif f in ("assigned_to", "completed_by", "completed_at"):
-                        task[f] = None
-                    elif f in ("status",):
-                        task[f] = "pending"
-                    elif f in ("description",):
-                        task[f] = ""
-                    elif f in ("created_by",):
-                        task[f] = "Unknown"
-                    elif f in ("created_at",):
-                        task[f] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            if "id" not in task:
+                task["id"] = str(uuid.uuid4())
+            if "name" not in task:
+                task["name"] = "Unnamed Task"
+            if "description" not in task:
+                task["description"] = ""
+            if "reward" not in task:
+                task["reward"] = 0
+            if "created_by" not in task:
+                task["created_by"] = "Unknown"
+            if "created_at" not in task:
+                task["created_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            if "participants" not in task:
+                task["participants"] = {}
 
         return data
     except Exception as e:
@@ -159,7 +154,7 @@ def is_admin(interaction: discord.Interaction):
 
 
 # ============================================================
-# FUND EMBEDS
+# FUND EMBEDS (unchanged)
 # ============================================================
 
 def create_fund_embed():
@@ -205,7 +200,7 @@ def create_fund_embed():
 
 
 # ============================================================
-# TREASURY EMBEDS
+# TREASURY EMBEDS (unchanged)
 # ============================================================
 
 TRANSACTION_TYPE_LABELS = {"deposit": "🟢 Deposit", "withdraw": "🔴 Withdraw"}
@@ -250,7 +245,7 @@ def create_treasury_embed():
 
 
 # ============================================================
-# TASK EMBED
+# TASK EMBED (UPDATED)
 # ============================================================
 
 def create_task_embed(page=0, per_page=5):
@@ -264,24 +259,25 @@ def create_task_embed(page=0, per_page=5):
     embed = discord.Embed(title="📋 GANG TASKS - TITAN", color=discord.Color.blurple())
     if page_items:
         for task in page_items:
-            status_emoji = "✅" if task.get("status") == "completed" else "❌"
-            assignee = task.get("assigned_to") or "Unassigned"
             reward = task.get("reward", 0)
-            reward_str = f" (Reward: ${reward:,})" if reward > 0 else ""
-            field_name = f"{status_emoji} {task.get('name', 'Unnamed')} (ID: {task.get('id', '?')[:6]})"
-            field_value = f"> **Assigned to:** {assignee}{reward_str}\n> {task.get('description', 'No description')}"
-            if task.get("status") == "completed":
-                completed_by = task.get("completed_by") or "Unknown"
-                completed_at = task.get("completed_at", "")
-                if completed_at:
-                    try:
-                        dt = datetime.datetime.fromisoformat(completed_at)
-                        completed_at_str = f"<t:{int(dt.timestamp())}:f>"
-                    except:
-                        completed_at_str = completed_at
-                else:
-                    completed_at_str = "Unknown"
-                field_value += f"\n> **Completed by:** {completed_by} • {completed_at_str}"
+            reward_str = f" (Reward: ${reward:,} each)" if reward > 0 else ""
+            field_name = f"📌 {task.get('name', 'Unnamed')} (ID: {task.get('id', '?')[:6]})"
+            
+            participants = task.get("participants", {})
+            total_parts = len(participants)
+            completed = sum(1 for v in participants.values() if v)
+            status_line = f"**Progress:** {completed}/{total_parts} completed"
+            
+            if participants:
+                player_lines = []
+                for player_name, done in participants.items():
+                    icon = "✅" if done else "❌"
+                    player_lines.append(f"{icon} **{player_name}**")
+                player_text = "\n".join(player_lines)
+            else:
+                player_text = "No players assigned yet."
+            
+            field_value = f"{status_line}\n{player_text}{reward_str}\n> {task.get('description', 'No description')}"
             embed.add_field(name=field_name, value=field_value, inline=False)
     else:
         embed.add_field(name="No tasks", value="Use `/task_create` to add tasks.", inline=False)
@@ -572,7 +568,7 @@ async def player_autocomplete(interaction: discord.Interaction, current: str):
 
 
 # ============================================================
-# FUND VIEWS AND MODALS
+# FUND VIEWS AND MODALS (unchanged)
 # ============================================================
 
 class PaidSelect(discord.ui.Select):
@@ -626,7 +622,6 @@ class FundView(discord.ui.View):
         await interaction.response.send_message("Select who is unpaid:", view=view, ephemeral=True)
 
 
-# Treasury modals
 def parse_amount(raw: str):
     raw = raw.strip().replace(",", "").replace("$", "")
     try:
@@ -675,36 +670,10 @@ class TreasuryView(discord.ui.View):
 
 
 # ============================================================
-# TASK PANEL VIEW & MODALS
+# TASK PANEL VIEW & MODALS (REVAMPED)
 # ============================================================
 
-class TaskCompleteSelect(discord.ui.Select):
-    def __init__(self, tasks):
-        options = []
-        for t in tasks:
-            label = f"{t.get('name','')[:80]} (ID:{t['id'][:6]})"
-            options.append(discord.SelectOption(label=label, value=t["id"]))
-        super().__init__(placeholder="Select a task to complete...", min_values=1, max_values=1, options=options[:25])
-    async def callback(self, interaction: discord.Interaction):
-        task_id = self.values[0]
-        task = next((t for t in data["tasks"] if t["id"] == task_id), None)
-        if not task or task["status"] == "completed":
-            await interaction.response.edit_message(content="❌ Task not found or already completed.", view=None)
-            return
-        reward = task.get("reward", 0)
-        if reward > data["treasury_balance"]:
-            await interaction.response.edit_message(content=f"❌ Insufficient treasury funds for reward ${reward:,}. Balance: ${data['treasury_balance']:,}.", view=None)
-            return
-        if reward > 0:
-            await record_transaction("withdraw", reward, f"Task completion reward: {task['name']}", interaction.user)
-        task["status"] = "completed"
-        task["completed_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        task["completed_by"] = str(interaction.user.display_name)
-        save_data(data)
-        await update_all_task_panels()
-        await interaction.response.edit_message(content=f"✅ Task '{task['name']}' completed.{' Reward $'+format(reward, ',')+' paid.' if reward else ''}", view=None)
-
-class TaskAssignModal(discord.ui.Modal, title="Assign Task"):
+class TaskAddPlayerModal(discord.ui.Modal, title="Add Player to Task"):
     def __init__(self, task_id):
         super().__init__()
         self.task_id = task_id
@@ -716,67 +685,145 @@ class TaskAssignModal(discord.ui.Modal, title="Assign Task"):
         task = next((t for t in data["tasks"] if t["id"] == self.task_id), None)
         if not task:
             return await interaction.response.send_message("❌ Task not found.", ephemeral=True)
-        task["assigned_to"] = player_name
+        if player_name in task["participants"]:
+            return await interaction.response.send_message(f"❌ {player_name} is already a participant.", ephemeral=True)
+        task["participants"][player_name] = False
         save_data(data)
         await update_all_task_panels()
-        await interaction.response.send_message(f"✅ Assigned **{player_name}** to task '{task['name']}'.", ephemeral=True)
+        await interaction.response.send_message(f"✅ Added **{player_name}** to task '{task['name']}'.", ephemeral=True)
 
 class TaskPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Complete Task", style=discord.ButtonStyle.success, emoji="✅", custom_id="task_complete_button")
-    async def complete_task(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Add Player", style=discord.ButtonStyle.success, emoji="➕", custom_id="task_add_player")
+    async def add_player(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_admin(interaction):
             return await interaction.response.send_message("❌ No permission.", ephemeral=True)
-        pending = [t for t in data["tasks"] if t["status"] == "pending"]
-        if not pending:
-            return await interaction.response.send_message("❌ No pending tasks.", ephemeral=True)
-        select = TaskCompleteSelect(pending)
-        view = discord.ui.View(timeout=60)
-        view.add_item(select)
-        await interaction.response.send_message("Select a task to complete:", view=view, ephemeral=True)
-
-    @discord.ui.button(label="Assign Task", style=discord.ButtonStyle.primary, emoji="📌", custom_id="task_assign_button")
-    async def assign_task_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_admin(interaction):
-            return await interaction.response.send_message("❌ No permission.", ephemeral=True)
-        pending = [t for t in data["tasks"] if t["status"] == "pending"]
-        if not pending:
-            return await interaction.response.send_message("❌ No pending tasks.", ephemeral=True)
-        options = [discord.SelectOption(label=f"{t['name'][:80]} (ID:{t['id'][:6]})", value=t["id"]) for t in pending]
-        select = discord.ui.Select(placeholder="Select a task to assign...", options=options[:25])
+        if not data["tasks"]:
+            return await interaction.response.send_message("❌ No tasks.", ephemeral=True)
+        options = [discord.SelectOption(label=f"{t['name'][:80]} (ID:{t['id'][:6]})", value=t["id"]) for t in data["tasks"]]
+        select = discord.ui.Select(placeholder="Select a task...", options=options[:25])
         async def select_callback(sel_interaction):
             task_id = select.values[0]
-            await sel_interaction.response.send_modal(TaskAssignModal(task_id))
+            await sel_interaction.response.send_modal(TaskAddPlayerModal(task_id))
         select.callback = select_callback
         view = discord.ui.View(timeout=60)
         view.add_item(select)
-        await interaction.response.send_message("Select a task to assign:", view=view, ephemeral=True)
+        await interaction.response.send_message("Select a task to add a player to:", view=view, ephemeral=True)
 
-    @discord.ui.button(label="Unassign Task", style=discord.ButtonStyle.secondary, emoji="🔓", custom_id="task_unassign_button")
-    async def unassign_task_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Mark Complete", style=discord.ButtonStyle.primary, emoji="✅", custom_id="task_mark_complete")
+    async def mark_complete(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_admin(interaction):
             return await interaction.response.send_message("❌ No permission.", ephemeral=True)
-        assigned = [t for t in data["tasks"] if t["assigned_to"] and t["status"] == "pending"]
-        if not assigned:
-            return await interaction.response.send_message("❌ No assigned pending tasks.", ephemeral=True)
-        options = [discord.SelectOption(label=f"{t['name'][:80]} (to {t['assigned_to']})", value=t["id"]) for t in assigned]
-        select = discord.ui.Select(placeholder="Select a task to unassign...", options=options[:25])
-        async def select_callback(sel_interaction):
+        # First, pick a task
+        tasks = data.get("tasks", [])
+        if not tasks:
+            return await interaction.response.send_message("❌ No tasks.", ephemeral=True)
+        options = [discord.SelectOption(label=f"{t['name'][:80]} (ID:{t['id'][:6]})", value=t["id"]) for t in tasks]
+        select = discord.ui.Select(placeholder="Select a task...", options=options[:25])
+        async def task_select_callback(sel_interaction):
             task_id = select.values[0]
-            task = next((t for t in data["tasks"] if t["id"] == task_id), None)
-            if task:
-                task["assigned_to"] = None
+            task = next((t for t in tasks if t["id"] == task_id), None)
+            if not task:
+                return await sel_interaction.response.edit_message(content="❌ Task not found.", view=None)
+            participants = task.get("participants", {})
+            incomplete = [(name, done) for name, done in participants.items() if not done]
+            if not incomplete:
+                return await sel_interaction.response.edit_message(content="❌ No incomplete players in this task.", view=None)
+            player_options = [discord.SelectOption(label=name, value=name) for name, _ in incomplete[:25]]
+            player_select = discord.ui.Select(placeholder="Select a player to mark complete...", options=player_options)
+            async def mark_callback(player_interaction):
+                player_name = player_select.values[0]
+                # Deduct reward if set
+                reward = task.get("reward", 0)
+                if reward > data["treasury_balance"]:
+                    return await player_interaction.response.edit_message(
+                        content=f"❌ Insufficient treasury funds for reward ${reward:,}. Balance: ${data['treasury_balance']:,}.", view=None)
+                if reward > 0:
+                    await record_transaction("withdraw", reward, f"Task completion: {task['name']} - {player_name}", player_interaction.user)
+                task["participants"][player_name] = True
                 save_data(data)
                 await update_all_task_panels()
-                await sel_interaction.response.edit_message(content=f"✅ Unassigned task '{task['name']}'.", view=None)
-        select.callback = select_callback
+                await player_interaction.response.edit_message(
+                    content=f"✅ Marked **{player_name}** complete on task '{task['name']}'.{' Reward $'+format(reward,',')+' paid.' if reward else ''}", view=None)
+            player_select.callback = mark_callback
+            view = discord.ui.View(timeout=60)
+            view.add_item(player_select)
+            await sel_interaction.response.edit_message(content="Select a player:", view=view)
+        select.callback = task_select_callback
         view = discord.ui.View(timeout=60)
         view.add_item(select)
-        await interaction.response.send_message("Select a task to unassign:", view=view, ephemeral=True)
+        await interaction.response.send_message("Select a task:", view=view, ephemeral=True)
 
-    @discord.ui.button(label="Delete Task", style=discord.ButtonStyle.danger, emoji="🗑️", custom_id="task_delete_button")
+    @discord.ui.button(label="Mark Incomplete", style=discord.ButtonStyle.secondary, emoji="❌", custom_id="task_mark_incomplete")
+    async def mark_incomplete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_admin(interaction):
+            return await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        tasks = data.get("tasks", [])
+        if not tasks:
+            return await interaction.response.send_message("❌ No tasks.", ephemeral=True)
+        options = [discord.SelectOption(label=f"{t['name'][:80]} (ID:{t['id'][:6]})", value=t["id"]) for t in tasks]
+        select = discord.ui.Select(placeholder="Select a task...", options=options[:25])
+        async def task_select_callback(sel_interaction):
+            task_id = select.values[0]
+            task = next((t for t in tasks if t["id"] == task_id), None)
+            if not task:
+                return await sel_interaction.response.edit_message(content="❌ Task not found.", view=None)
+            completed = [(name, True) for name, done in task.get("participants", {}).items() if done]
+            if not completed:
+                return await sel_interaction.response.edit_message(content="❌ No completed players in this task.", view=None)
+            player_options = [discord.SelectOption(label=name, value=name) for name, _ in completed[:25]]
+            player_select = discord.ui.Select(placeholder="Select a player to mark incomplete...", options=player_options)
+            async def mark_callback(player_interaction):
+                player_name = player_select.values[0]
+                task["participants"][player_name] = False
+                save_data(data)
+                await update_all_task_panels()
+                await player_interaction.response.edit_message(content=f"❌ Marked **{player_name}** incomplete on task '{task['name']}'.", view=None)
+            player_select.callback = mark_callback
+            view = discord.ui.View(timeout=60)
+            view.add_item(player_select)
+            await sel_interaction.response.edit_message(content="Select a player:", view=view)
+        select.callback = task_select_callback
+        view = discord.ui.View(timeout=60)
+        view.add_item(select)
+        await interaction.response.send_message("Select a task:", view=view, ephemeral=True)
+
+    @discord.ui.button(label="Remove Player", style=discord.ButtonStyle.danger, emoji="🗑️", custom_id="task_remove_player")
+    async def remove_player(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_admin(interaction):
+            return await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        tasks = data.get("tasks", [])
+        if not tasks:
+            return await interaction.response.send_message("❌ No tasks.", ephemeral=True)
+        options = [discord.SelectOption(label=f"{t['name'][:80]} (ID:{t['id'][:6]})", value=t["id"]) for t in tasks]
+        select = discord.ui.Select(placeholder="Select a task...", options=options[:25])
+        async def task_select_callback(sel_interaction):
+            task_id = select.values[0]
+            task = next((t for t in tasks if t["id"] == task_id), None)
+            if not task:
+                return await sel_interaction.response.edit_message(content="❌ Task not found.", view=None)
+            if not task.get("participants"):
+                return await sel_interaction.response.edit_message(content="❌ No players in this task.", view=None)
+            player_options = [discord.SelectOption(label=name, value=name) for name in task["participants"]][:25]
+            player_select = discord.ui.Select(placeholder="Select a player to remove...", options=player_options)
+            async def remove_callback(player_interaction):
+                player_name = player_select.values[0]
+                del task["participants"][player_name]
+                save_data(data)
+                await update_all_task_panels()
+                await player_interaction.response.edit_message(content=f"🗑️ Removed **{player_name}** from task '{task['name']}'.", view=None)
+            player_select.callback = remove_callback
+            view = discord.ui.View(timeout=60)
+            view.add_item(player_select)
+            await sel_interaction.response.edit_message(content="Select a player:", view=view)
+        select.callback = task_select_callback
+        view = discord.ui.View(timeout=60)
+        view.add_item(select)
+        await interaction.response.send_message("Select a task:", view=view, ephemeral=True)
+
+    @discord.ui.button(label="Delete Task", style=discord.ButtonStyle.danger, emoji="❌", custom_id="task_delete_button")
     async def delete_task_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_admin(interaction):
             return await interaction.response.send_message("❌ No permission.", ephemeral=True)
@@ -826,7 +873,7 @@ async def on_ready():
 
 
 # ============================================================
-# /FUND_... COMMANDS
+# /FUND_... COMMANDS (unchanged)
 # ============================================================
 
 @bot.tree.command(name="fund_add", description="Add a player to the gang fund")
@@ -1069,7 +1116,7 @@ async def fund_transcript(interaction: discord.Interaction):
 
 
 # ============================================================
-# TASK COMMANDS
+# TASK COMMANDS (UPDATED)
 # ============================================================
 
 async def task_autocomplete(interaction: discord.Interaction, current: str):
@@ -1077,82 +1124,98 @@ async def task_autocomplete(interaction: discord.Interaction, current: str):
     matches = [t for t in tasks if current.lower() in t.get("name","").lower() or current.lower() in t["id"][:6]]
     return [app_commands.Choice(name=f"{t['name'][:80]} (ID:{t['id'][:6]})", value=t["id"]) for t in matches[:25]]
 
+async def task_player_autocomplete(interaction: discord.Interaction, current: str):
+    # Autocomplete for player names in a specific task – not directly possible in slash option.
+    # We'll just use string input; autocomplete not needed.
+    return []
+
 @bot.tree.command(name="task_create", description="Create a new gang task")
-@app_commands.describe(name="Task name", description="Task details", reward="Reward amount (0 for none)", assignee="Player to assign (optional)")
-@app_commands.autocomplete(assignee=player_autocomplete)
-async def task_create(interaction: discord.Interaction, name: str, description: str = "", reward: int = 0, assignee: str = None):
+@app_commands.describe(name="Task name", description="Task details", reward="Reward per player completion (0 for none)")
+async def task_create(interaction: discord.Interaction, name: str, description: str = "", reward: int = 0):
     await interaction.response.defer(ephemeral=True)
     if not is_admin(interaction): return await interaction.followup.send("❌ No permission.", ephemeral=True)
     if reward < 0: return await interaction.followup.send("❌ Reward cannot be negative.", ephemeral=True)
-    if assignee and assignee not in data["members"]: return await interaction.followup.send("❌ Assignee not in gang fund.", ephemeral=True)
     task = {
         "id": str(uuid.uuid4()),
         "name": name.strip(),
         "description": description.strip(),
-        "assigned_to": assignee,
-        "status": "pending",
         "reward": reward,
         "created_by": str(interaction.user.display_name),
         "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "completed_at": None,
-        "completed_by": None
+        "participants": {}
     }
     data["tasks"].append(task)
     save_data(data)
     await update_all_task_panels()
     msg = f"✅ Task '{name}' created (ID: {task['id'][:6]})."
-    if reward: msg += f" Reward: ${reward:,}."
-    if assignee: msg += f" Assigned to {assignee}."
+    if reward: msg += f" Reward per player: ${reward:,}."
     await interaction.followup.send(msg, ephemeral=True)
 
-@bot.tree.command(name="task_assign", description="Assign a task to a player")
+@bot.tree.command(name="task_add_player", description="Add a player to a task")
 @app_commands.describe(task_id="Task ID", player="Player name")
 @app_commands.autocomplete(task_id=task_autocomplete, player=player_autocomplete)
-async def task_assign(interaction: discord.Interaction, task_id: str, player: str):
+async def task_add_player(interaction: discord.Interaction, task_id: str, player: str):
     await interaction.response.defer(ephemeral=True)
     if not is_admin(interaction): return await interaction.followup.send("❌ No permission.", ephemeral=True)
-    task = next((t for t in data["tasks"] if t["id"] == task_id), None)
-    if not task: return await interaction.followup.send("❌ Task not found.", ephemeral=True)
     if player not in data["members"]: return await interaction.followup.send("❌ Player not in gang fund.", ephemeral=True)
-    task["assigned_to"] = player
+    task = next((t for t in data["tasks"] if t["id"] == task_id), None)
+    if not task: return await interaction.followup.send("❌ Task not found.", ephemeral=True)
+    if player in task["participants"]: return await interaction.followup.send(f"❌ {player} is already a participant.", ephemeral=True)
+    task["participants"][player] = False
     save_data(data)
     await update_all_task_panels()
-    await interaction.followup.send(f"✅ Assigned **{player}** to task '{task['name']}'.", ephemeral=True)
+    await interaction.followup.send(f"✅ Added **{player}** to task '{task['name']}'.", ephemeral=True)
 
-@bot.tree.command(name="task_complete", description="Complete a task and pay reward from treasury")
-@app_commands.describe(task_id="Task ID")
+@bot.tree.command(name="task_remove_player", description="Remove a player from a task")
+@app_commands.describe(task_id="Task ID", player="Player name")
 @app_commands.autocomplete(task_id=task_autocomplete)
-async def task_complete(interaction: discord.Interaction, task_id: str):
+async def task_remove_player(interaction: discord.Interaction, task_id: str, player: str):
     await interaction.response.defer(ephemeral=True)
     if not is_admin(interaction): return await interaction.followup.send("❌ No permission.", ephemeral=True)
     task = next((t for t in data["tasks"] if t["id"] == task_id), None)
     if not task: return await interaction.followup.send("❌ Task not found.", ephemeral=True)
-    if task["status"] == "completed": return await interaction.followup.send("❌ Already completed.", ephemeral=True)
-    reward = task.get("reward", 0)
-    if reward > data["treasury_balance"]: return await interaction.followup.send(f"❌ Insufficient funds for reward ${reward:,}. Balance: ${data['treasury_balance']:,}.", ephemeral=True)
-    if reward > 0:
-        await record_transaction("withdraw", reward, f"Task completion reward: {task['name']}", interaction.user)
-    task["status"] = "completed"
-    task["completed_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    task["completed_by"] = str(interaction.user.display_name)
+    if player not in task["participants"]: return await interaction.followup.send(f"❌ {player} is not a participant.", ephemeral=True)
+    del task["participants"][player]
     save_data(data)
     await update_all_task_panels()
-    msg = f"✅ Task '{task['name']}' completed."
+    await interaction.followup.send(f"🗑️ Removed **{player}** from task '{task['name']}'.", ephemeral=True)
+
+@bot.tree.command(name="task_mark_complete", description="Mark a player as having completed a task")
+@app_commands.describe(task_id="Task ID", player="Player name")
+@app_commands.autocomplete(task_id=task_autocomplete)
+async def task_mark_complete(interaction: discord.Interaction, task_id: str, player: str):
+    await interaction.response.defer(ephemeral=True)
+    if not is_admin(interaction): return await interaction.followup.send("❌ No permission.", ephemeral=True)
+    task = next((t for t in data["tasks"] if t["id"] == task_id), None)
+    if not task: return await interaction.followup.send("❌ Task not found.", ephemeral=True)
+    if player not in task["participants"]: return await interaction.followup.send("❌ Player not a participant.", ephemeral=True)
+    if task["participants"][player]: return await interaction.followup.send("❌ Already completed.", ephemeral=True)
+    reward = task.get("reward", 0)
+    if reward > data["treasury_balance"]:
+        return await interaction.followup.send(f"❌ Insufficient funds for reward ${reward:,}. Balance: ${data['treasury_balance']:,}.", ephemeral=True)
+    if reward > 0:
+        await record_transaction("withdraw", reward, f"Task completion: {task['name']} - {player}", interaction.user)
+    task["participants"][player] = True
+    save_data(data)
+    await update_all_task_panels()
+    msg = f"✅ Marked **{player}** complete on task '{task['name']}'."
     if reward: msg += f" Paid ${reward:,} reward."
     await interaction.followup.send(msg, ephemeral=True)
 
-@bot.tree.command(name="task_unassign", description="Remove assignment from a task")
-@app_commands.describe(task_id="Task ID")
+@bot.tree.command(name="task_mark_incomplete", description="Unmark a player as completed on a task")
+@app_commands.describe(task_id="Task ID", player="Player name")
 @app_commands.autocomplete(task_id=task_autocomplete)
-async def task_unassign(interaction: discord.Interaction, task_id: str):
+async def task_mark_incomplete(interaction: discord.Interaction, task_id: str, player: str):
     await interaction.response.defer(ephemeral=True)
     if not is_admin(interaction): return await interaction.followup.send("❌ No permission.", ephemeral=True)
     task = next((t for t in data["tasks"] if t["id"] == task_id), None)
     if not task: return await interaction.followup.send("❌ Task not found.", ephemeral=True)
-    task["assigned_to"] = None
+    if player not in task["participants"]: return await interaction.followup.send("❌ Player not a participant.", ephemeral=True)
+    if not task["participants"][player]: return await interaction.followup.send("❌ Already incomplete.", ephemeral=True)
+    task["participants"][player] = False
     save_data(data)
     await update_all_task_panels()
-    await interaction.followup.send(f"✅ Unassigned task '{task['name']}'.", ephemeral=True)
+    await interaction.followup.send(f"❌ Marked **{player}** incomplete on task '{task['name']}'.", ephemeral=True)
 
 @bot.tree.command(name="task_delete", description="Delete a task")
 @app_commands.describe(task_id="Task ID")
@@ -1166,30 +1229,6 @@ async def task_delete(interaction: discord.Interaction, task_id: str):
     save_data(data)
     await update_all_task_panels()
     await interaction.followup.send(f"🗑️ Deleted task '{task['name']}'.", ephemeral=True)
-
-@bot.tree.command(name="task_edit", description="Edit a task")
-@app_commands.describe(task_id="Task ID", name="New name (leave blank to keep)", description="New description", reward="New reward", assignee="New assignee (leave blank to keep, 'none' to unassign)")
-@app_commands.autocomplete(task_id=task_autocomplete, assignee=player_autocomplete)
-async def task_edit(interaction: discord.Interaction, task_id: str, name: str = None, description: str = None, reward: int = None, assignee: str = None):
-    await interaction.response.defer(ephemeral=True)
-    if not is_admin(interaction): return await interaction.followup.send("❌ No permission.", ephemeral=True)
-    task = next((t for t in data["tasks"] if t["id"] == task_id), None)
-    if not task: return await interaction.followup.send("❌ Task not found.", ephemeral=True)
-    if name is not None: task["name"] = name.strip()
-    if description is not None: task["description"] = description.strip()
-    if reward is not None:
-        if reward < 0: return await interaction.followup.send("❌ Reward cannot be negative.", ephemeral=True)
-        task["reward"] = reward
-    if assignee is not None:
-        if assignee.lower() == "none":
-            task["assigned_to"] = None
-        elif assignee not in data["members"]:
-            return await interaction.followup.send("❌ Assignee not in gang fund.", ephemeral=True)
-        else:
-            task["assigned_to"] = assignee
-    save_data(data)
-    await update_all_task_panels()
-    await interaction.followup.send(f"✅ Task '{task['name']}' updated.", ephemeral=True)
 
 @bot.tree.command(name="task_list", description="List all gang tasks (paginated)")
 async def task_list(interaction: discord.Interaction, page: int = 1):
@@ -1228,7 +1267,7 @@ async def task_panel(interaction: discord.Interaction):
 
 
 # ============================================================
-# EMBED BUILDER (/embed create)
+# EMBED BUILDER (/embed create) – unchanged
 # ============================================================
 
 def is_embed_empty(embed: discord.Embed) -> bool:
