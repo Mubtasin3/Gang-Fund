@@ -76,25 +76,10 @@ def default_data():
     return {
         "amount": 0,
         "members": {},
-        # Tracks every panel message that has ever been posted
-        # (via /fund_list or /fund_panel) so they can all be
-        # auto-updated whenever the fund data changes.
         "panels": [],
-        # Optional free-text note shown at the bottom of the
-        # fund embed, set with /fund_message.
         "message": "",
-        # --------------------------------------------------
-        # TREASURY (deposit / withdraw with a full transcript)
-        # --------------------------------------------------
-        # Running cash balance of the gang fund.
         "treasury_balance": 0,
-        # Full history of every deposit/withdraw, newest last.
-        # Each entry: {type, amount, reason, user_id, user_name,
-        # balance_after, timestamp}
         "transactions": [],
-        # Tracks every treasury panel message (posted via
-        # /fund_treasury) so they can all be auto-updated
-        # whenever the treasury balance changes.
         "treasury_panels": []
     }
 
@@ -119,26 +104,15 @@ def load_data():
 
             data = json.load(file)
 
-        if "amount" not in data:
-            data["amount"] = 0
-
-        if "members" not in data:
-            data["members"] = {}
-
-        if "panels" not in data:
-            data["panels"] = []
-
-        if "message" not in data:
-            data["message"] = ""
-
-        if "treasury_balance" not in data:
-            data["treasury_balance"] = 0
-
-        if "transactions" not in data:
-            data["transactions"] = []
-
-        if "treasury_panels" not in data:
-            data["treasury_panels"] = []
+        # Ensure all keys exist
+        for key in ["amount", "members", "panels", "message", "treasury_balance", "transactions", "treasury_panels"]:
+            if key not in data:
+                if key in ["members"]:
+                    data[key] = {}
+                elif key in ["panels", "treasury_panels", "transactions"]:
+                    data[key] = []
+                else:
+                    data[key] = "" if key == "message" else 0
 
         return data
 
@@ -567,20 +541,11 @@ def create_treasury_embed():
 # DISCORD-CHANNEL BACKUP / RESTORE
 # ============================================================
 #
-# Solves data loss on redeploy: local disk on most hosts (Render
-# included) is wiped on every redeploy. This backs up data.json
-# as a file attachment in a private channel, and restores it on
-# startup if the local file doesn't exist.
+# Every backup creates a NEW message (with timestamp) in
+# #gang-fund-backups, keeping all historical backups.
 #
-# Every backup creates a NEW message (with timestamp) in the
-# channel, so all historical backups are kept.
-#
-# The channel is found/created AUTOMATICALLY — no env var setup
-# required. If BACKUP_CHANNEL_ID is set, that channel is used
-# instead (as an override); otherwise the bot looks for a channel
-# named "gang-fund-backups" in the guild, and creates it (private,
-# bot-only) if it doesn't exist yet. This requires the bot to have
-# the "Manage Channels" permission to auto-create it.
+# The channel is found/created AUTOMATICALLY. If BACKUP_CHANNEL_ID
+# is set, that channel is used instead (override).
 # ============================================================
 
 BACKUP_CHANNEL_NAME = "gang-fund-backups"
@@ -591,9 +556,7 @@ if _backup_channel_override_id:
     _backup_channel_override_id = int(_backup_channel_override_id)
 
 _backup_channel = None
-# Removed _backup_message_id – we no longer edit a single message.
 
-# Diagnostics, surfaced via /fund_backup_status
 _last_backup_ok = None
 _last_backup_error = None
 _last_backup_time = None
@@ -648,9 +611,6 @@ async def get_backup_channel():
                 f"({e}). Falling back to auto-managed channel."
             )
 
-    # guild.text_channels needs the full Guild object (with the
-    # channel cache populated), not the partial one fetch_guild
-    # can return — re-fetch from cache to be safe.
     guild = bot.get_guild(GUILD_ID)
 
     if guild is None:
@@ -664,7 +624,7 @@ async def get_backup_channel():
 
             return _backup_channel
 
-    # Not found anywhere — create it, private to the bot only.
+    # Auto-create
     try:
 
         overwrites = {
@@ -683,8 +643,7 @@ async def get_backup_channel():
             name=BACKUP_CHANNEL_NAME,
             overwrites=overwrites,
             reason=(
-                "Auto-created to back up gang fund data so the "
-                "player list survives redeploys."
+                "Auto-created to back up gang fund data"
             )
         )
 
@@ -699,11 +658,7 @@ async def get_backup_channel():
     except discord.Forbidden:
 
         print(
-            "Bot is missing the 'Manage Channels' permission — "
-            "cannot auto-create the backup channel. Data will NOT "
-            "survive redeploys until this permission is granted "
-            "(or BACKUP_CHANNEL_ID is set to an existing channel "
-            "the bot can already post in)."
+            "Bot missing 'Manage Channels' — cannot auto-create backup channel."
         )
 
         return None
@@ -727,10 +682,7 @@ async def push_backup():
     if channel is None:
 
         _last_backup_ok = False
-        _last_backup_error = (
-            "No backup channel available (missing permission or "
-            "inaccessible BACKUP_CHANNEL_ID)."
-        )
+        _last_backup_error = "No backup channel available."
         _last_backup_time = datetime.datetime.now(datetime.timezone.utc)
 
         return
@@ -749,7 +701,7 @@ async def push_backup():
     )
 
     try:
-        # Always create a new message with timestamp
+
         content = (
             f"🗄️ Gang fund data backup — "
             f"{datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
@@ -783,7 +735,6 @@ async def restore_backup_if_needed():
         return
 
     try:
-        # History yields newest first, so the first backup we find is the most recent.
         async for message in channel.history(limit=50):
 
             if message.author.id != bot.user.id:
@@ -795,8 +746,6 @@ async def restore_backup_if_needed():
                     continue
 
                 if _data_file_existed_at_boot:
-                    # Local data already exists (e.g. a persistent
-                    # disk is attached) — don't overwrite it.
                     return
 
                 raw = await attachment.read()
@@ -805,26 +754,14 @@ async def restore_backup_if_needed():
                     raw.decode("utf-8")
                 )
 
-                if "amount" not in restored:
-                    restored["amount"] = 0
-
-                if "members" not in restored:
-                    restored["members"] = {}
-
-                if "panels" not in restored:
-                    restored["panels"] = []
-
-                if "message" not in restored:
-                    restored["message"] = ""
-
-                if "treasury_balance" not in restored:
-                    restored["treasury_balance"] = 0
-
-                if "transactions" not in restored:
-                    restored["transactions"] = []
-
-                if "treasury_panels" not in restored:
-                    restored["treasury_panels"] = []
+                for key in ["amount", "members", "panels", "message", "treasury_balance", "transactions", "treasury_panels"]:
+                    if key not in restored:
+                        if key in ["members"]:
+                            restored[key] = {}
+                        elif key in ["panels", "treasury_panels", "transactions"]:
+                            restored[key] = []
+                        else:
+                            restored[key] = "" if key == "message" else 0
 
                 data = restored
 
@@ -846,12 +783,6 @@ async def restore_backup_if_needed():
 
 # ============================================================
 # PANEL AUTO-UPDATE
-# ============================================================
-#
-# Every panel message ever posted with /fund_list or /fund_panel
-# gets tracked in data["panels"]. Whenever fund data changes, we
-# push the updated embed to every tracked panel automatically.
-# If a panel message was deleted, it's dropped from the list.
 # ============================================================
 
 async def register_panel(message: discord.Message):
@@ -920,16 +851,6 @@ async def update_all_panels():
 
 # ============================================================
 # TREASURY TRANSCRIPT CHANNEL
-# ============================================================
-#
-# Every deposit and withdraw is posted as its own message to a
-# dedicated, permanent log channel — so there's always a full,
-# unforgeable transcript of gang treasury activity, independent
-# of the summarized "last 10" shown on the panel embed.
-#
-# Like the backup channel, this is found/created automatically.
-# It's readable by everyone in the server (for accountability)
-# but only the bot can post in it.
 # ============================================================
 
 TRANSCRIPT_CHANNEL_NAME = "gang-fund-transcript"
@@ -1038,9 +959,7 @@ async def get_transcript_channel():
     except discord.Forbidden:
 
         print(
-            "Bot is missing the 'Manage Channels' permission — "
-            "cannot auto-create the transcript channel. Set "
-            "TRANSCRIPT_CHANNEL_ID to an existing channel instead."
+            "Bot missing 'Manage Channels' — cannot auto-create transcript channel."
         )
 
         return None
@@ -1145,6 +1064,7 @@ async def record_transaction(
 
     await post_transcript_entry(entry)
 
+    # This is where the treasury panel gets auto‑updated after every transaction.
     await update_all_treasury_panels()
 
     return entry
@@ -1755,8 +1675,7 @@ async def on_ready():
                 f"ERROR syncing slash commands: {e}"
             )
 
-        # Make sure any already-posted panels reflect whatever
-        # data we just booted with (including a restored backup).
+        # Auto‑refresh all panels to reflect current data.
         await update_all_panels()
         await update_all_treasury_panels()
 
@@ -1767,10 +1686,6 @@ async def on_ready():
 
 # ============================================================
 # /FUND_ADD
-# ============================================================
-# Uses a real Discord member picker instead of free text, so the
-# stored name is always a proper display name — never a raw
-# mention string like <@123456789012345678>.
 # ============================================================
 
 @bot.tree.command(
@@ -1785,8 +1700,6 @@ async def fund_add(
     player: discord.Member
 ):
 
-    # Respond immediately so Discord
-    # does not expire the interaction.
     await interaction.response.defer(
         ephemeral=True
     )
@@ -2036,9 +1949,6 @@ async def fund_amount(
 # ============================================================
 # /FUND_MESSAGE
 # ============================================================
-# Sets (or clears) a free-text note shown at the bottom of the
-# fund embed, above the footer. Leave "text" empty to clear it.
-# ============================================================
 
 @bot.tree.command(
     name="fund_message",
@@ -2089,8 +1999,6 @@ async def fund_message(
 # ============================================================
 # /FUND_LIST
 # ============================================================
-# Posts a panel and registers it so future changes auto-update it.
-# ============================================================
 
 @bot.tree.command(
     name="fund_list",
@@ -2100,8 +2008,6 @@ async def fund_list(
     interaction: discord.Interaction
 ):
 
-    # Defer immediately.
-    # Then use followup instead of response.
     await interaction.response.defer()
 
     embed = create_fund_embed()
@@ -2156,10 +2062,6 @@ async def fund_reset(
 
 # ============================================================
 # /FUND_RESET_LIST
-# ============================================================
-# The ONLY command that removes players from the list wholesale.
-# Gated behind a confirmation button since it's destructive and
-# cannot be undone (aside from restoring an older backup).
 # ============================================================
 
 class ConfirmResetListView(discord.ui.View):
@@ -2285,9 +2187,6 @@ async def fund_reset_list(
 
 # ============================================================
 # /FUND_BACKUP_STATUS
-# ============================================================
-# Diagnostic command so you can verify backups are actually
-# working without having to wait for a redeploy to find out.
 # ============================================================
 
 @bot.tree.command(
@@ -2433,11 +2332,7 @@ async def fund_backup_now(
 
 
 # ============================================================
-# NEW: /FUND_IMPORT
-# ============================================================
-# Allows an admin to upload a backup .json file and restore
-# the entire gang fund state from it. After import, a new
-# backup is immediately created, preserving the imported state.
+# /FUND_IMPORT – Import a backup JSON file
 # ============================================================
 
 @bot.tree.command(
@@ -2465,7 +2360,6 @@ async def fund_import(
 
         return
 
-    # Validate file type
     if not backup_file.filename.endswith(".json"):
 
         await interaction.followup.send(
@@ -2489,7 +2383,7 @@ async def fund_import(
 
         return
 
-    # Ensure required keys exist
+    # Validate required keys
     if "members" not in imported or "amount" not in imported:
 
         await interaction.followup.send(
@@ -2499,30 +2393,27 @@ async def fund_import(
 
         return
 
-    # Set defaults for missing optional keys
+    # Defaults for missing keys
     for key in ["panels", "treasury_panels", "transactions"]:
-
         if key not in imported:
             imported[key] = []
 
-    for key in ["message"]:
-
-        if key not in imported:
-            imported[key] = ""
+    if "message" not in imported:
+        imported["message"] = ""
 
     if "treasury_balance" not in imported:
         imported["treasury_balance"] = 0
 
-    # Overwrite the global data and save locally
+    # Overwrite local data
     global data
     data = imported
     save_data(data)
 
-    # Update all panels and treasury panels
+    # Refresh all panels immediately
     await update_all_panels()
     await update_all_treasury_panels()
 
-    # Immediately push a fresh backup of the imported state
+    # Push a fresh backup of the imported state
     await push_backup()
 
     await interaction.followup.send(
@@ -2535,8 +2426,6 @@ async def fund_import(
 
 # ============================================================
 # /FUND_PANEL
-# ============================================================
-# Posts a panel and registers it so future changes auto-update it.
 # ============================================================
 
 @bot.tree.command(
@@ -2578,9 +2467,6 @@ async def fund_panel(
 # ============================================================
 # /FUND_TREASURY
 # ============================================================
-# Posts the treasury panel (Deposit / Withdraw buttons) and
-# registers it so future transactions auto-update it.
-# ============================================================
 
 @bot.tree.command(
     name="fund_treasury",
@@ -2620,11 +2506,6 @@ async def fund_treasury(
 
 # ============================================================
 # /FUND_DEPOSIT and /FUND_WITHDRAW
-# ============================================================
-# Command versions of the Deposit / Withdraw buttons, for admins
-# who prefer slash commands. Both go through the same
-# record_transaction() helper, so they're logged to the
-# transcript channel exactly like button-driven transactions.
 # ============================================================
 
 @bot.tree.command(
@@ -2739,9 +2620,6 @@ async def fund_withdraw(
 
 # ============================================================
 # /FUND_TRANSCRIPT
-# ============================================================
-# Browsable, paginated view of the FULL treasury transaction
-# history (not just the last 10 shown on the panel embed).
 # ============================================================
 
 TRANSCRIPT_PAGE_SIZE = 10
@@ -2934,20 +2812,8 @@ async def fund_transcript(
 
 
 # ============================================================
-# ============================================================
 # GENERAL-PURPOSE EMBED BUILDER  (/embed create)
 # ============================================================
-# ============================================================
-#
-# A standalone embed creation tool, unrelated to the gang fund
-# tracker, for posting any custom embed (announcements, rules,
-# info panels, etc). Supports title/description, author, footer,
-# image/thumbnail, color, up to 25 fields, and up to 10 embeds
-# in a single message — similar to the Discord embed builder UI.
-#
-# Usage: /embed create  -> opens an interactive, ephemeral builder
-# ============================================================
-
 
 def is_embed_empty(embed: discord.Embed) -> bool:
 
@@ -2967,10 +2833,6 @@ def is_embed_empty(embed: discord.Embed) -> bool:
 
 def preview_embeds(embeds: list) -> list:
 
-    # Discord rejects a message containing a truly empty embed
-    # (400: "description is required"). For the live preview we
-    # substitute a harmless placeholder on a COPY so the real
-    # embed object (and its modal defaults) stay untouched.
     result = []
 
     for embed in embeds:
