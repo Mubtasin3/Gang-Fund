@@ -570,7 +570,10 @@ def create_treasury_embed():
 # Solves data loss on redeploy: local disk on most hosts (Render
 # included) is wiped on every redeploy. This backs up data.json
 # as a file attachment in a private channel, and restores it on
-# startup if the local file doesn't exist. No paid disk needed.
+# startup if the local file doesn't exist.
+#
+# Every backup creates a NEW message (with timestamp) in the
+# channel, so all historical backups are kept.
 #
 # The channel is found/created AUTOMATICALLY — no env var setup
 # required. If BACKUP_CHANNEL_ID is set, that channel is used
@@ -588,7 +591,7 @@ if _backup_channel_override_id:
     _backup_channel_override_id = int(_backup_channel_override_id)
 
 _backup_channel = None
-_backup_message_id = None
+# Removed _backup_message_id – we no longer edit a single message.
 
 # Diagnostics, surfaced via /fund_backup_status
 _last_backup_ok = None
@@ -715,8 +718,8 @@ async def get_backup_channel():
 
 
 async def push_backup():
+    """Sends a **new** backup message every time (no editing)."""
 
-    global _backup_message_id
     global _last_backup_ok, _last_backup_error, _last_backup_time
 
     channel = await get_backup_channel()
@@ -746,36 +749,13 @@ async def push_backup():
     )
 
     try:
-
-        if _backup_message_id:
-
-            try:
-
-                message = await channel.fetch_message(
-                    _backup_message_id
-                )
-
-                await message.edit(
-                    content="🗄️ Gang fund data backup (auto-updated, do not delete)",
-                    attachments=[file]
-                )
-
-                _last_backup_ok = True
-                _last_backup_error = None
-                _last_backup_time = datetime.datetime.now(datetime.timezone.utc)
-
-                return
-
-            except discord.NotFound:
-
-                _backup_message_id = None
-
-        message = await channel.send(
-            content="🗄️ Gang fund data backup (auto-updated, do not delete)",
-            file=file
+        # Always create a new message with timestamp
+        content = (
+            f"🗄️ Gang fund data backup — "
+            f"{datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
         )
 
-        _backup_message_id = message.id
+        await channel.send(content=content, file=file)
 
         _last_backup_ok = True
         _last_backup_error = None
@@ -793,8 +773,9 @@ async def push_backup():
 
 
 async def restore_backup_if_needed():
+    """On startup, if local data.json is missing, restore from the latest backup in the channel."""
 
-    global data, _backup_message_id
+    global data
 
     channel = await get_backup_channel()
 
@@ -802,7 +783,7 @@ async def restore_backup_if_needed():
         return
 
     try:
-
+        # History yields newest first, so the first backup we find is the most recent.
         async for message in channel.history(limit=50):
 
             if message.author.id != bot.user.id:
@@ -812,10 +793,6 @@ async def restore_backup_if_needed():
 
                 if attachment.filename != "gang_fund_backup.json":
                     continue
-
-                # Cache this message so future backups edit it
-                # instead of spamming new messages.
-                _backup_message_id = message.id
 
                 if _data_file_existed_at_boot:
                     # Local data already exists (e.g. a persistent
@@ -2353,6 +2330,12 @@ async def fund_backup_status(
             inline=False
         )
 
+        embed.add_field(
+            name="Info",
+            value="All backups are kept permanently. Each data change creates a new message.",
+            inline=False
+        )
+
     else:
 
         embed.add_field(
@@ -2447,6 +2430,107 @@ async def fund_backup_now(
             f"❌ Backup failed: {_last_backup_error}",
             ephemeral=True
         )
+
+
+# ============================================================
+# NEW: /FUND_IMPORT
+# ============================================================
+# Allows an admin to upload a backup .json file and restore
+# the entire gang fund state from it. After import, a new
+# backup is immediately created, preserving the imported state.
+# ============================================================
+
+@bot.tree.command(
+    name="fund_import",
+    description="Import gang fund data from a backup JSON file"
+)
+@app_commands.describe(
+    backup_file="The backup .json file to import"
+)
+async def fund_import(
+    interaction: discord.Interaction,
+    backup_file: discord.Attachment
+):
+
+    await interaction.response.defer(
+        ephemeral=True
+    )
+
+    if not is_admin(interaction):
+
+        await interaction.followup.send(
+            "❌ You don't have permission.",
+            ephemeral=True
+        )
+
+        return
+
+    # Validate file type
+    if not backup_file.filename.endswith(".json"):
+
+        await interaction.followup.send(
+            "❌ Please upload a `.json` file.",
+            ephemeral=True
+        )
+
+        return
+
+    try:
+
+        raw = await backup_file.read()
+        imported = json.loads(raw.decode("utf-8"))
+
+    except Exception as e:
+
+        await interaction.followup.send(
+            f"❌ Failed to read JSON: {e}",
+            ephemeral=True
+        )
+
+        return
+
+    # Ensure required keys exist
+    if "members" not in imported or "amount" not in imported:
+
+        await interaction.followup.send(
+            "❌ Invalid backup file – missing 'members' or 'amount'.",
+            ephemeral=True
+        )
+
+        return
+
+    # Set defaults for missing optional keys
+    for key in ["panels", "treasury_panels", "transactions"]:
+
+        if key not in imported:
+            imported[key] = []
+
+    for key in ["message"]:
+
+        if key not in imported:
+            imported[key] = ""
+
+    if "treasury_balance" not in imported:
+        imported["treasury_balance"] = 0
+
+    # Overwrite the global data and save locally
+    global data
+    data = imported
+    save_data(data)
+
+    # Update all panels and treasury panels
+    await update_all_panels()
+    await update_all_treasury_panels()
+
+    # Immediately push a fresh backup of the imported state
+    await push_backup()
+
+    await interaction.followup.send(
+        f"✅ Backup imported successfully! Loaded {len(data['members'])} players "
+        f"and ${data.get('treasury_balance', 0):,} treasury balance. "
+        f"A new backup has been saved.",
+        ephemeral=True
+    )
 
 
 # ============================================================
