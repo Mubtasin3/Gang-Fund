@@ -68,7 +68,6 @@ def default_data():
         "treasury_balance": 0,
         "transactions": [],
         "treasury_panels": [],
-        # Gang Tasks – updated structure
         "tasks": [],
         "task_panels": []
     }
@@ -89,7 +88,6 @@ def load_data():
             if key not in data:
                 data[key] = defaults[key]
 
-        # Ensure every task has the new fields
         for task in data.get("tasks", []):
             if "id" not in task:
                 task["id"] = str(uuid.uuid4())
@@ -245,7 +243,7 @@ def create_treasury_embed():
 
 
 # ============================================================
-# TASK EMBED (UPDATED)
+# TASK EMBED (UPDATED - BIGGER TASK NAME)
 # ============================================================
 
 def create_task_embed(page=0, per_page=5):
@@ -261,7 +259,8 @@ def create_task_embed(page=0, per_page=5):
         for task in page_items:
             reward = task.get("reward", 0)
             reward_str = f" (Reward: ${reward:,} each)" if reward > 0 else ""
-            field_name = f"📌 {task.get('name', 'Unnamed')} (ID: {task.get('id', '?')[:6]})"
+            # Use a big emoji and bold name on its own line
+            field_name = f"📌 Task (ID: {task.get('id', '?')[:6]})"
             
             participants = task.get("participants", {})
             total_parts = len(participants)
@@ -277,7 +276,8 @@ def create_task_embed(page=0, per_page=5):
             else:
                 player_text = "No players assigned yet."
             
-            field_value = f"{status_line}\n{player_text}{reward_str}\n> {task.get('description', 'No description')}"
+            # Task name in bold, larger feel
+            field_value = f"**__{task.get('name', 'Unnamed Task')}__**\n{status_line}\n{player_text}{reward_str}\n> {task.get('description', 'No description')}"
             embed.add_field(name=field_name, value=field_value, inline=False)
     else:
         embed.add_field(name="No tasks", value="Use `/task_create` to add tasks.", inline=False)
@@ -670,27 +670,8 @@ class TreasuryView(discord.ui.View):
 
 
 # ============================================================
-# TASK PANEL VIEW & MODALS (REVAMPED)
+# TASK PANEL VIEW & MODALS (UPDATED - DROPDOWN ADD PLAYER)
 # ============================================================
-
-class TaskAddPlayerModal(discord.ui.Modal, title="Add Player to Task"):
-    def __init__(self, task_id):
-        super().__init__()
-        self.task_id = task_id
-    player = discord.ui.TextInput(label="Player name", placeholder="Enter exact player name", required=True)
-    async def on_submit(self, interaction: discord.Interaction):
-        player_name = self.player.value.strip()
-        if player_name not in data["members"]:
-            return await interaction.response.send_message("❌ That player is not in the gang fund list.", ephemeral=True)
-        task = next((t for t in data["tasks"] if t["id"] == self.task_id), None)
-        if not task:
-            return await interaction.response.send_message("❌ Task not found.", ephemeral=True)
-        if player_name in task["participants"]:
-            return await interaction.response.send_message(f"❌ {player_name} is already a participant.", ephemeral=True)
-        task["participants"][player_name] = False
-        save_data(data)
-        await update_all_task_panels()
-        await interaction.response.send_message(f"✅ Added **{player_name}** to task '{task['name']}'.", ephemeral=True)
 
 class TaskPanelView(discord.ui.View):
     def __init__(self):
@@ -702,21 +683,41 @@ class TaskPanelView(discord.ui.View):
             return await interaction.response.send_message("❌ No permission.", ephemeral=True)
         if not data["tasks"]:
             return await interaction.response.send_message("❌ No tasks.", ephemeral=True)
+        # Step 1: Choose task
         options = [discord.SelectOption(label=f"{t['name'][:80]} (ID:{t['id'][:6]})", value=t["id"]) for t in data["tasks"]]
         select = discord.ui.Select(placeholder="Select a task...", options=options[:25])
-        async def select_callback(sel_interaction):
+        async def task_select_callback(sel_interaction):
             task_id = select.values[0]
-            await sel_interaction.response.send_modal(TaskAddPlayerModal(task_id))
-        select.callback = select_callback
+            task = next((t for t in data["tasks"] if t["id"] == task_id), None)
+            if not task:
+                return await sel_interaction.response.edit_message(content="❌ Task not found.", view=None)
+            # Get eligible players: gang fund members not already in task
+            all_members = set(data["members"].keys())
+            already_in = set(task["participants"].keys())
+            eligible = sorted(all_members - already_in)
+            if not eligible:
+                return await sel_interaction.response.edit_message(content="❌ All gang members are already in this task.", view=None)
+            player_options = [discord.SelectOption(label=name[:100], value=name) for name in eligible[:25]]
+            player_select = discord.ui.Select(placeholder="Select a player to add...", options=player_options)
+            async def add_callback(player_interaction):
+                player_name = player_select.values[0]
+                task["participants"][player_name] = False
+                save_data(data)
+                await update_all_task_panels()
+                await player_interaction.response.edit_message(content=f"✅ Added **{player_name}** to task '{task['name']}'.", view=None)
+            player_select.callback = add_callback
+            view = discord.ui.View(timeout=60)
+            view.add_item(player_select)
+            await sel_interaction.response.edit_message(content="Select a player to add:", view=view)
+        select.callback = task_select_callback
         view = discord.ui.View(timeout=60)
         view.add_item(select)
-        await interaction.response.send_message("Select a task to add a player to:", view=view, ephemeral=True)
+        await interaction.response.send_message("Select a task:", view=view, ephemeral=True)
 
     @discord.ui.button(label="Mark Complete", style=discord.ButtonStyle.primary, emoji="✅", custom_id="task_mark_complete")
     async def mark_complete(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_admin(interaction):
             return await interaction.response.send_message("❌ No permission.", ephemeral=True)
-        # First, pick a task
         tasks = data.get("tasks", [])
         if not tasks:
             return await interaction.response.send_message("❌ No tasks.", ephemeral=True)
@@ -727,15 +728,13 @@ class TaskPanelView(discord.ui.View):
             task = next((t for t in tasks if t["id"] == task_id), None)
             if not task:
                 return await sel_interaction.response.edit_message(content="❌ Task not found.", view=None)
-            participants = task.get("participants", {})
-            incomplete = [(name, done) for name, done in participants.items() if not done]
+            incomplete = [(name, done) for name, done in task.get("participants", {}).items() if not done]
             if not incomplete:
                 return await sel_interaction.response.edit_message(content="❌ No incomplete players in this task.", view=None)
             player_options = [discord.SelectOption(label=name, value=name) for name, _ in incomplete[:25]]
             player_select = discord.ui.Select(placeholder="Select a player to mark complete...", options=player_options)
             async def mark_callback(player_interaction):
                 player_name = player_select.values[0]
-                # Deduct reward if set
                 reward = task.get("reward", 0)
                 if reward > data["treasury_balance"]:
                     return await player_interaction.response.edit_message(
@@ -1116,18 +1115,13 @@ async def fund_transcript(interaction: discord.Interaction):
 
 
 # ============================================================
-# TASK COMMANDS (UPDATED)
+# TASK COMMANDS (unchanged - slash commands still work)
 # ============================================================
 
 async def task_autocomplete(interaction: discord.Interaction, current: str):
     tasks = data.get("tasks", [])
     matches = [t for t in tasks if current.lower() in t.get("name","").lower() or current.lower() in t["id"][:6]]
     return [app_commands.Choice(name=f"{t['name'][:80]} (ID:{t['id'][:6]})", value=t["id"]) for t in matches[:25]]
-
-async def task_player_autocomplete(interaction: discord.Interaction, current: str):
-    # Autocomplete for player names in a specific task – not directly possible in slash option.
-    # We'll just use string input; autocomplete not needed.
-    return []
 
 @bot.tree.command(name="task_create", description="Create a new gang task")
 @app_commands.describe(name="Task name", description="Task details", reward="Reward per player completion (0 for none)")
@@ -1153,7 +1147,7 @@ async def task_create(interaction: discord.Interaction, name: str, description: 
 
 @bot.tree.command(name="task_add_player", description="Add a player to a task")
 @app_commands.describe(task_id="Task ID", player="Player name")
-@app_commands.autocomplete(task_id=task_autocomplete, player=player_autocomplete)
+@app_commands.autocomplete(task_id=task_autocomplete)
 async def task_add_player(interaction: discord.Interaction, task_id: str, player: str):
     await interaction.response.defer(ephemeral=True)
     if not is_admin(interaction): return await interaction.followup.send("❌ No permission.", ephemeral=True)
@@ -1267,7 +1261,7 @@ async def task_panel(interaction: discord.Interaction):
 
 
 # ============================================================
-# EMBED BUILDER (/embed create) – unchanged
+# EMBED BUILDER (unchanged)
 # ============================================================
 
 def is_embed_empty(embed: discord.Embed) -> bool:
