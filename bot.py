@@ -82,7 +82,20 @@ def default_data():
         "panels": [],
         # Optional free-text note shown at the bottom of the
         # fund embed, set with /fund_message.
-        "message": ""
+        "message": "",
+        # --------------------------------------------------
+        # TREASURY (deposit / withdraw with a full transcript)
+        # --------------------------------------------------
+        # Running cash balance of the gang fund.
+        "treasury_balance": 0,
+        # Full history of every deposit/withdraw, newest last.
+        # Each entry: {type, amount, reason, user_id, user_name,
+        # balance_after, timestamp}
+        "transactions": [],
+        # Tracks every treasury panel message (posted via
+        # /fund_treasury) so they can all be auto-updated
+        # whenever the treasury balance changes.
+        "treasury_panels": []
     }
 
 
@@ -117,6 +130,15 @@ def load_data():
 
         if "message" not in data:
             data["message"] = ""
+
+        if "treasury_balance" not in data:
+            data["treasury_balance"] = 0
+
+        if "transactions" not in data:
+            data["transactions"] = []
+
+        if "treasury_panels" not in data:
+            data["treasury_panels"] = []
 
         return data
 
@@ -387,6 +409,155 @@ def create_fund_embed():
 
     embed.set_footer(
         text="Use the buttons below to update payments."
+    )
+
+    return embed
+
+
+# ============================================================
+# CREATE TREASURY EMBED
+# ============================================================
+
+TRANSACTION_TYPE_LABELS = {
+    "deposit": "🟢 Deposit",
+    "withdraw": "🔴 Withdraw"
+}
+
+
+def format_transaction_line(entry):
+
+    label = TRANSACTION_TYPE_LABELS.get(
+        entry.get("type"),
+        entry.get("type", "Transaction")
+    )
+
+    amount = entry.get("amount", 0)
+
+    reason = entry.get("reason") or "No reason provided"
+
+    user_name = entry.get("user_name", "Unknown")
+
+    timestamp = entry.get("timestamp")
+
+    if timestamp:
+
+        try:
+
+            dt = datetime.datetime.fromisoformat(timestamp)
+
+            time_text = f"<t:{int(dt.timestamp())}:R>"
+
+        except ValueError:
+
+            time_text = ""
+
+    else:
+
+        time_text = ""
+
+    return (
+        f"{label} **${amount:,}** by **{user_name}** {time_text}\n"
+        f"> {reason}"
+    )
+
+
+def create_treasury_embed():
+
+    balance = data.get(
+        "treasury_balance",
+        0
+    )
+
+    transactions = data.get(
+        "transactions",
+        []
+    )
+
+    embed = discord.Embed(
+        title="🏦 GANG TREASURY - TITAN",
+        description="Deposit or withdraw funds. Every transaction is logged.",
+        color=(
+            discord.Color.green()
+            if balance >= 0
+            else discord.Color.red()
+        )
+    )
+
+    embed.add_field(
+        name="💰 Current Balance",
+        value=f"${balance:,}",
+        inline=False
+    )
+
+    recent = transactions[-10:]
+
+    if recent:
+
+        lines = [
+            format_transaction_line(entry)
+            for entry in reversed(recent)
+        ]
+
+        chunks = []
+
+        current_chunk = ""
+
+        for line in lines:
+
+            if (
+                len(current_chunk)
+                + len(line)
+                + 2
+                > 1000
+            ):
+
+                chunks.append(
+                    current_chunk
+                )
+
+                current_chunk = line
+
+            else:
+
+                if current_chunk:
+
+                    current_chunk += "\n\n"
+
+                current_chunk += line
+
+        if current_chunk:
+
+            chunks.append(
+                current_chunk
+            )
+
+        for index, chunk in enumerate(chunks):
+
+            field_name = (
+                "🧾 Recent Transactions"
+                if index == 0
+                else "🧾 Recent Transactions (Continued)"
+            )
+
+            embed.add_field(
+                name=field_name,
+                value=chunk,
+                inline=False
+            )
+
+    else:
+
+        embed.add_field(
+            name="🧾 Recent Transactions",
+            value="No transactions yet.",
+            inline=False
+        )
+
+    embed.set_footer(
+        text=(
+            f"Showing the last {len(recent)} of {len(transactions)} "
+            f"transaction(s) • Use /fund_transcript for the full history"
+        )
     )
 
     return embed
@@ -669,6 +840,15 @@ async def restore_backup_if_needed():
                 if "message" not in restored:
                     restored["message"] = ""
 
+                if "treasury_balance" not in restored:
+                    restored["treasury_balance"] = 0
+
+                if "transactions" not in restored:
+                    restored["transactions"] = []
+
+                if "treasury_panels" not in restored:
+                    restored["treasury_panels"] = []
+
                 data = restored
 
                 save_data(data)
@@ -757,6 +937,306 @@ async def update_all_panels():
             )
 
     data["panels"] = still_valid
+
+    save_data(data)
+
+
+# ============================================================
+# TREASURY TRANSCRIPT CHANNEL
+# ============================================================
+#
+# Every deposit and withdraw is posted as its own message to a
+# dedicated, permanent log channel — so there's always a full,
+# unforgeable transcript of gang treasury activity, independent
+# of the summarized "last 10" shown on the panel embed.
+#
+# Like the backup channel, this is found/created automatically.
+# It's readable by everyone in the server (for accountability)
+# but only the bot can post in it.
+# ============================================================
+
+TRANSCRIPT_CHANNEL_NAME = "gang-fund-transcript"
+
+_transcript_channel_override_id = os.getenv("TRANSCRIPT_CHANNEL_ID")
+
+if _transcript_channel_override_id:
+    _transcript_channel_override_id = int(_transcript_channel_override_id)
+
+_transcript_channel = None
+
+
+async def get_transcript_channel():
+
+    global _transcript_channel
+
+    if _transcript_channel is not None:
+        return _transcript_channel
+
+    guild = bot.get_guild(GUILD_ID)
+
+    if guild is None:
+
+        try:
+
+            guild = await bot.fetch_guild(GUILD_ID)
+
+        except Exception as e:
+
+            print(
+                f"Could not fetch guild for transcript channel: {e}"
+            )
+
+            return None
+
+    if _transcript_channel_override_id:
+
+        try:
+
+            channel = bot.get_channel(
+                _transcript_channel_override_id
+            )
+
+            if channel is None:
+
+                channel = await bot.fetch_channel(
+                    _transcript_channel_override_id
+                )
+
+            _transcript_channel = channel
+
+            return _transcript_channel
+
+        except Exception as e:
+
+            print(
+                f"TRANSCRIPT_CHANNEL_ID is set but not accessible "
+                f"({e}). Falling back to auto-managed channel."
+            )
+
+    guild = bot.get_guild(GUILD_ID)
+
+    if guild is None:
+        return None
+
+    for channel in guild.text_channels:
+
+        if channel.name == TRANSCRIPT_CHANNEL_NAME:
+
+            _transcript_channel = channel
+
+            return _transcript_channel
+
+    try:
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=False
+            ),
+            guild.me: discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                embed_links=True,
+                read_message_history=True
+            )
+        }
+
+        channel = await guild.create_text_channel(
+            name=TRANSCRIPT_CHANNEL_NAME,
+            overwrites=overwrites,
+            reason=(
+                "Auto-created to keep a permanent transcript of "
+                "every gang treasury deposit/withdraw."
+            )
+        )
+
+        print(
+            f"Created transcript channel #{channel.name} ({channel.id})"
+        )
+
+        _transcript_channel = channel
+
+        return _transcript_channel
+
+    except discord.Forbidden:
+
+        print(
+            "Bot is missing the 'Manage Channels' permission — "
+            "cannot auto-create the transcript channel. Set "
+            "TRANSCRIPT_CHANNEL_ID to an existing channel instead."
+        )
+
+        return None
+
+    except Exception as e:
+
+        print(
+            f"Failed to create transcript channel: {e}"
+        )
+
+        return None
+
+
+async def post_transcript_entry(entry):
+
+    channel = await get_transcript_channel()
+
+    if channel is None:
+        return
+
+    is_deposit = entry.get("type") == "deposit"
+
+    embed = discord.Embed(
+        title=(
+            "🟢 Deposit Recorded"
+            if is_deposit
+            else "🔴 Withdrawal Recorded"
+        ),
+        color=(
+            discord.Color.green()
+            if is_deposit
+            else discord.Color.red()
+        ),
+        timestamp=datetime.datetime.now(datetime.timezone.utc)
+    )
+
+    embed.add_field(
+        name="Amount",
+        value=f"${entry.get('amount', 0):,}",
+        inline=True
+    )
+
+    embed.add_field(
+        name="New Balance",
+        value=f"${entry.get('balance_after', 0):,}",
+        inline=True
+    )
+
+    embed.add_field(
+        name="By",
+        value=f"<@{entry.get('user_id')}>",
+        inline=True
+    )
+
+    embed.add_field(
+        name="Reason",
+        value=entry.get("reason") or "No reason provided",
+        inline=False
+    )
+
+    try:
+
+        await channel.send(embed=embed)
+
+    except Exception as e:
+
+        print(
+            f"Failed to post transcript entry: {e}"
+        )
+
+
+async def record_transaction(
+    transaction_type: str,
+    amount: int,
+    reason: str,
+    user: discord.abc.User
+):
+
+    if transaction_type == "deposit":
+
+        data["treasury_balance"] += amount
+
+    else:
+
+        data["treasury_balance"] -= amount
+
+    entry = {
+        "type": transaction_type,
+        "amount": amount,
+        "reason": reason.strip() if reason else "",
+        "user_id": user.id,
+        "user_name": str(user.display_name),
+        "balance_after": data["treasury_balance"],
+        "timestamp": datetime.datetime.now(
+            datetime.timezone.utc
+        ).isoformat()
+    }
+
+    data["transactions"].append(entry)
+
+    save_data(data)
+
+    await post_transcript_entry(entry)
+
+    await update_all_treasury_panels()
+
+    return entry
+
+
+# ============================================================
+# TREASURY PANEL AUTO-UPDATE
+# ============================================================
+
+async def register_treasury_panel(message: discord.Message):
+
+    data["treasury_panels"].append(
+        {
+            "channel_id": message.channel.id,
+            "message_id": message.id
+        }
+    )
+
+    save_data(data)
+
+
+async def update_all_treasury_panels():
+
+    await push_backup()
+
+    if not data.get("treasury_panels"):
+        return
+
+    embed = create_treasury_embed()
+
+    still_valid = []
+
+    for panel in data["treasury_panels"]:
+
+        try:
+
+            channel = bot.get_channel(
+                panel["channel_id"]
+            )
+
+            if channel is None:
+
+                channel = await bot.fetch_channel(
+                    panel["channel_id"]
+                )
+
+            message = await channel.fetch_message(
+                panel["message_id"]
+            )
+
+            await message.edit(
+                embed=embed,
+                view=TreasuryView()
+            )
+
+            still_valid.append(panel)
+
+        except (
+            discord.NotFound,
+            discord.Forbidden,
+            discord.HTTPException
+        ) as e:
+
+            print(
+                f"Dropping stale treasury panel "
+                f"{panel}: {e}"
+            )
+
+    data["treasury_panels"] = still_valid
 
     save_data(data)
 
@@ -1033,6 +1513,212 @@ class FundView(
 
 
 # ============================================================
+# DEPOSIT / WITHDRAW MODALS
+# ============================================================
+
+def parse_amount(raw: str):
+
+    raw = raw.strip().replace(",", "").replace("$", "")
+
+    try:
+
+        value = int(raw)
+
+    except ValueError:
+
+        return None
+
+    if value <= 0:
+
+        return None
+
+    return value
+
+
+class DepositModal(discord.ui.Modal, title="Deposit to Gang Fund"):
+
+    amount_input = discord.ui.TextInput(
+        label="Amount",
+        placeholder="e.g. 5000",
+        required=True,
+        max_length=15
+    )
+
+    reason_input = discord.ui.TextInput(
+        label="Reason",
+        placeholder="e.g. Weekly member dues, robbery payout...",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=300
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+
+        amount = parse_amount(
+            self.amount_input.value
+        )
+
+        if amount is None:
+
+            await interaction.response.send_message(
+                "❌ Enter a valid whole number greater than 0.",
+                ephemeral=True
+            )
+
+            return
+
+        await interaction.response.defer(
+            ephemeral=True
+        )
+
+        entry = await record_transaction(
+            "deposit",
+            amount,
+            self.reason_input.value,
+            interaction.user
+        )
+
+        await interaction.followup.send(
+            f"🟢 Deposited **${amount:,}**. "
+            f"New balance: **${entry['balance_after']:,}**.",
+            ephemeral=True
+        )
+
+
+class WithdrawModal(discord.ui.Modal, title="Withdraw from Gang Fund"):
+
+    amount_input = discord.ui.TextInput(
+        label="Amount",
+        placeholder="e.g. 2500",
+        required=True,
+        max_length=15
+    )
+
+    reason_input = discord.ui.TextInput(
+        label="Reason",
+        placeholder="e.g. Bought supplies, gang expenses...",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=300
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+
+        amount = parse_amount(
+            self.amount_input.value
+        )
+
+        if amount is None:
+
+            await interaction.response.send_message(
+                "❌ Enter a valid whole number greater than 0.",
+                ephemeral=True
+            )
+
+            return
+
+        if amount > data.get("treasury_balance", 0):
+
+            await interaction.response.send_message(
+                f"❌ Insufficient funds. Current balance is "
+                f"**${data.get('treasury_balance', 0):,}**.",
+                ephemeral=True
+            )
+
+            return
+
+        await interaction.response.defer(
+            ephemeral=True
+        )
+
+        entry = await record_transaction(
+            "withdraw",
+            amount,
+            self.reason_input.value,
+            interaction.user
+        )
+
+        await interaction.followup.send(
+            f"🔴 Withdrew **${amount:,}**. "
+            f"New balance: **${entry['balance_after']:,}**.",
+            ephemeral=True
+        )
+
+
+# ============================================================
+# TREASURY BUTTON VIEW
+# ============================================================
+
+class TreasuryView(
+    discord.ui.View
+):
+
+    def __init__(self):
+
+        super().__init__(
+            timeout=None
+        )
+
+    # --------------------------------------------------------
+    # DEPOSIT BUTTON
+    # --------------------------------------------------------
+
+    @discord.ui.button(
+        label="Deposit",
+        style=discord.ButtonStyle.success,
+        emoji="🟢",
+        custom_id="gang_fund_deposit"
+    )
+    async def deposit(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        if not is_admin(interaction):
+
+            await interaction.response.send_message(
+                "❌ You don't have permission to manage the gang treasury.",
+                ephemeral=True
+            )
+
+            return
+
+        await interaction.response.send_modal(
+            DepositModal()
+        )
+
+    # --------------------------------------------------------
+    # WITHDRAW BUTTON
+    # --------------------------------------------------------
+
+    @discord.ui.button(
+        label="Withdraw",
+        style=discord.ButtonStyle.danger,
+        emoji="🔴",
+        custom_id="gang_fund_withdraw"
+    )
+    async def withdraw(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        if not is_admin(interaction):
+
+            await interaction.response.send_message(
+                "❌ You don't have permission to manage the gang treasury.",
+                ephemeral=True
+            )
+
+            return
+
+        await interaction.response.send_modal(
+            WithdrawModal()
+        )
+
+
+# ============================================================
 # BOT READY
 # ============================================================
 
@@ -1059,6 +1745,10 @@ async def on_ready():
 
         bot.add_view(
             FundView()
+        )
+
+        bot.add_view(
+            TreasuryView()
         )
 
         try:
@@ -1091,6 +1781,7 @@ async def on_ready():
         # Make sure any already-posted panels reflect whatever
         # data we just booted with (including a restored backup).
         await update_all_panels()
+        await update_all_treasury_panels()
 
     print(
         "GTA RP Gang Fund Bot is ready!"
@@ -1796,6 +2487,364 @@ async def fund_panel(
 
     await interaction.followup.send(
         "✅ Gang fund panel created!",
+        ephemeral=True
+    )
+
+
+# ============================================================
+# /FUND_TREASURY
+# ============================================================
+# Posts the treasury panel (Deposit / Withdraw buttons) and
+# registers it so future transactions auto-update it.
+# ============================================================
+
+@bot.tree.command(
+    name="fund_treasury",
+    description="Create the gang treasury panel (deposit / withdraw buttons)"
+)
+async def fund_treasury(
+    interaction: discord.Interaction
+):
+
+    await interaction.response.defer(
+        ephemeral=True
+    )
+
+    if not is_admin(interaction):
+
+        await interaction.followup.send(
+            "❌ You don't have permission.",
+            ephemeral=True
+        )
+
+        return
+
+    embed = create_treasury_embed()
+
+    message = await interaction.channel.send(
+        embed=embed,
+        view=TreasuryView()
+    )
+
+    await register_treasury_panel(message)
+
+    await interaction.followup.send(
+        "✅ Gang treasury panel created!",
+        ephemeral=True
+    )
+
+
+# ============================================================
+# /FUND_DEPOSIT and /FUND_WITHDRAW
+# ============================================================
+# Command versions of the Deposit / Withdraw buttons, for admins
+# who prefer slash commands. Both go through the same
+# record_transaction() helper, so they're logged to the
+# transcript channel exactly like button-driven transactions.
+# ============================================================
+
+@bot.tree.command(
+    name="fund_deposit",
+    description="Deposit money into the gang treasury"
+)
+@app_commands.describe(
+    amount="Amount to deposit",
+    reason="Why this money is being deposited"
+)
+async def fund_deposit(
+    interaction: discord.Interaction,
+    amount: int,
+    reason: str = ""
+):
+
+    await interaction.response.defer(
+        ephemeral=True
+    )
+
+    if not is_admin(interaction):
+
+        await interaction.followup.send(
+            "❌ You don't have permission.",
+            ephemeral=True
+        )
+
+        return
+
+    if amount <= 0:
+
+        await interaction.followup.send(
+            "❌ Amount must be greater than 0.",
+            ephemeral=True
+        )
+
+        return
+
+    entry = await record_transaction(
+        "deposit",
+        amount,
+        reason,
+        interaction.user
+    )
+
+    await interaction.followup.send(
+        f"🟢 Deposited **${amount:,}**. "
+        f"New balance: **${entry['balance_after']:,}**.",
+        ephemeral=True
+    )
+
+
+@bot.tree.command(
+    name="fund_withdraw",
+    description="Withdraw money from the gang treasury"
+)
+@app_commands.describe(
+    amount="Amount to withdraw",
+    reason="Why this money is being withdrawn"
+)
+async def fund_withdraw(
+    interaction: discord.Interaction,
+    amount: int,
+    reason: str = ""
+):
+
+    await interaction.response.defer(
+        ephemeral=True
+    )
+
+    if not is_admin(interaction):
+
+        await interaction.followup.send(
+            "❌ You don't have permission.",
+            ephemeral=True
+        )
+
+        return
+
+    if amount <= 0:
+
+        await interaction.followup.send(
+            "❌ Amount must be greater than 0.",
+            ephemeral=True
+        )
+
+        return
+
+    if amount > data.get("treasury_balance", 0):
+
+        await interaction.followup.send(
+            f"❌ Insufficient funds. Current balance is "
+            f"**${data.get('treasury_balance', 0):,}**.",
+            ephemeral=True
+        )
+
+        return
+
+    entry = await record_transaction(
+        "withdraw",
+        amount,
+        reason,
+        interaction.user
+    )
+
+    await interaction.followup.send(
+        f"🔴 Withdrew **${amount:,}**. "
+        f"New balance: **${entry['balance_after']:,}**.",
+        ephemeral=True
+    )
+
+
+# ============================================================
+# /FUND_TRANSCRIPT
+# ============================================================
+# Browsable, paginated view of the FULL treasury transaction
+# history (not just the last 10 shown on the panel embed).
+# ============================================================
+
+TRANSCRIPT_PAGE_SIZE = 10
+
+
+def create_transcript_page_embed(page: int):
+
+    transactions = data.get(
+        "transactions",
+        []
+    )
+
+    total = len(transactions)
+
+    total_pages = max(
+        1,
+        (total + TRANSCRIPT_PAGE_SIZE - 1) // TRANSCRIPT_PAGE_SIZE
+    )
+
+    page = max(
+        0,
+        min(page, total_pages - 1)
+    )
+
+    # Newest first.
+    ordered = list(
+        reversed(transactions)
+    )
+
+    start = page * TRANSCRIPT_PAGE_SIZE
+
+    page_items = ordered[start:start + TRANSCRIPT_PAGE_SIZE]
+
+    embed = discord.Embed(
+        title="🧾 Gang Treasury Transcript",
+        description=(
+            f"Current balance: **${data.get('treasury_balance', 0):,}** "
+            f"• {total} total transaction(s)"
+        ),
+        color=discord.Color.blurple()
+    )
+
+    if page_items:
+
+        for entry in page_items:
+
+            label = TRANSACTION_TYPE_LABELS.get(
+                entry.get("type"),
+                entry.get("type", "Transaction")
+            )
+
+            timestamp = entry.get("timestamp")
+
+            if timestamp:
+
+                try:
+
+                    dt = datetime.datetime.fromisoformat(timestamp)
+
+                    time_text = f"<t:{int(dt.timestamp())}:f>"
+
+                except ValueError:
+
+                    time_text = "Unknown time"
+
+            else:
+
+                time_text = "Unknown time"
+
+            embed.add_field(
+                name=f"{label} — ${entry.get('amount', 0):,}",
+                value=(
+                    f"By **{entry.get('user_name', 'Unknown')}** • {time_text}\n"
+                    f"Reason: {entry.get('reason') or 'No reason provided'}\n"
+                    f"Balance after: ${entry.get('balance_after', 0):,}"
+                ),
+                inline=False
+            )
+
+    else:
+
+        embed.add_field(
+            name="No transactions yet",
+            value="Use the Deposit / Withdraw buttons on the treasury panel to get started.",
+            inline=False
+        )
+
+    embed.set_footer(
+        text=f"Page {page + 1} of {total_pages}"
+    )
+
+    return embed, page, total_pages
+
+
+class TranscriptPaginatorView(discord.ui.View):
+
+    def __init__(self, owner_id: int):
+
+        super().__init__(timeout=180)
+
+        self.owner_id = owner_id
+        self.page = 0
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+
+        if interaction.user.id != self.owner_id:
+
+            await interaction.response.send_message(
+                "❌ This isn't your transcript view.",
+                ephemeral=True
+            )
+
+            return False
+
+        return True
+
+    @discord.ui.button(
+        label="◀ Previous",
+        style=discord.ButtonStyle.secondary
+    )
+    async def previous(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        self.page -= 1
+
+        embed, self.page, _ = create_transcript_page_embed(
+            self.page
+        )
+
+        await interaction.response.edit_message(
+            embed=embed,
+            view=self
+        )
+
+    @discord.ui.button(
+        label="Next ▶",
+        style=discord.ButtonStyle.secondary
+    )
+    async def next(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        self.page += 1
+
+        embed, self.page, _ = create_transcript_page_embed(
+            self.page
+        )
+
+        await interaction.response.edit_message(
+            embed=embed,
+            view=self
+        )
+
+
+@bot.tree.command(
+    name="fund_transcript",
+    description="View the full gang treasury transaction history"
+)
+async def fund_transcript(
+    interaction: discord.Interaction
+):
+
+    await interaction.response.defer(
+        ephemeral=True
+    )
+
+    embed, page, total_pages = create_transcript_page_embed(0)
+
+    view = TranscriptPaginatorView(
+        owner_id=interaction.user.id
+    )
+
+    view.page = page
+
+    if total_pages <= 1:
+
+        view.previous.disabled = True
+        view.next.disabled = True
+
+    await interaction.followup.send(
+        embed=embed,
+        view=view,
         ephemeral=True
     )
 
