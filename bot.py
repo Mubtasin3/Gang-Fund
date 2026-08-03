@@ -221,7 +221,7 @@ def create_treasury_embed():
 
     recent = transactions[-10:]
     if recent:
-        lines = [format_transaction_line(e) for e in reversed(recent)]
+        lines = [format_transaction_line(e) for e in recent]
         chunks = []
         current = ""
         for line in lines:
